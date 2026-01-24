@@ -83,7 +83,7 @@ fi
 if [ $edge_loss -eq 1 ]; then
     trainer="nnUNetTrainerEdgeLoss"
 elif [[ $model_name == "attn_unet" ]]; then
-    trainer="Atten9)tionUNetTrainer"
+    trainer="AttentionUNetTrainer"
 elif [[ $model_name == "unet++" ]]; then
     trainer="UNetPlusPlusTrainer"
 elif [[ $model_name == "SegResNet" ]]; then
