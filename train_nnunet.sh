@@ -40,8 +40,18 @@ trainer="nnUNetTrainer_20epochs"
 # trainer="MonoUNetTrainer"
 # trainer="MonoUNetTrainerAdamW"
 
-cfg="2d"
-# cfg="2d_tiny1"
+cfgs=(
+    "2d"
+    "2d_tiny1"
+    "2d_tiny2"
+    "2d_tiny4"
+    "2d_tiny8"
+    "2d_tiny16"
+    # "2d_tiny32"
+    # "2d_tiny64"
+    # "2d_tiny128"
+    # "2d_tiny256"
+)
 
 # inference parameters
 save_preds=false
