@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Resize nnUNet dataset images and labels in-place."""
+"""Resize nnUNet dataset images and labels into a new output dataset."""
 
 from __future__ import annotations
 
 import argparse
+import shutil
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
@@ -11,18 +12,21 @@ from PIL import Image
 from tqdm import tqdm
 
 
-def _process_one(task: tuple[Path, int, int]) -> None:
-    path, size, resample = task
-    with Image.open(path) as im:
+def _process_one(task: tuple[Path, Path, int, int]) -> None:
+    src_path, dst_path, size, resample = task
+    with Image.open(src_path) as im:
         im = im.resize((size, size), resample)
-        im.save(path)
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        im.save(dst_path)
 
 
-def _resize_dir(dir_path: Path, size: int, resample: int, desc: str, workers: int) -> None:
-    if not dir_path.exists():
+def _resize_dir(
+    src_dir: Path, dst_dir: Path, size: int, resample: int, desc: str, workers: int
+) -> None:
+    if not src_dir.exists():
         return
-    paths = sorted(dir_path.glob("*.png"))
-    tasks = [(p, size, resample) for p in paths]
+    paths = sorted(src_dir.glob("*.png"))
+    tasks = [(p, dst_dir / p.name, size, resample) for p in paths]
     if workers < 1:
         workers = max(cpu_count() - 1, 1)
     with Pool(processes=workers) as pool:
@@ -34,24 +38,43 @@ def _resize_dir(dir_path: Path, size: int, resample: int, desc: str, workers: in
             pass
 
 
-def resize_images(root: Path, size: int, workers: int) -> None:
+def resize_images(src_root: Path, dst_root: Path, size: int, workers: int) -> None:
     for subdir in ("imagesTr", "imagesTs"):
-        _resize_dir(root / subdir, size, Image.BILINEAR, f"resize {subdir}", workers)
+        _resize_dir(
+            src_root / subdir,
+            dst_root / subdir,
+            size,
+            Image.BILINEAR,
+            f"resize {subdir}",
+            workers,
+        )
 
 
-def resize_labels(root: Path, size: int, workers: int) -> None:
+def resize_labels(src_root: Path, dst_root: Path, size: int, workers: int) -> None:
     for subdir in ("labelsTr", "labelsTs"):
-        _resize_dir(root / subdir, size, Image.NEAREST, f"resize {subdir}", workers)
+        _resize_dir(
+            src_root / subdir,
+            dst_root / subdir,
+            size,
+            Image.NEAREST,
+            f"resize {subdir}",
+            workers,
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Resize nnUNet dataset images/labels in-place."
+        description="Resize nnUNet dataset images/labels into a new output dataset."
     )
     parser.add_argument(
         "--dataset",
         default="data/nnUNet_raw/Dataset302_EchoNet-Dynamic",
-        help="Path to nnUNet dataset root.",
+        help="Path to input nnUNet dataset root.",
+    )
+    parser.add_argument(
+        "--out",
+        default="data/nnUNet_raw/Dataset303_echonet_dynamic_resized",
+        help="Path to output nnUNet dataset root.",
     )
     parser.add_argument(
         "--size",
@@ -67,10 +90,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(args.dataset)
-    resize_images(root, args.size, args.workers)
-    resize_labels(root, args.size, args.workers)
-
+    src_root = Path(args.dataset)
+    dst_root = Path(args.out)
+    resize_images(src_root, dst_root, args.size, args.workers)
+    resize_labels(src_root, dst_root, args.size, args.workers)
+    # copy the dataset.json file to the dst_root
+    shutil.copy(src_root / "dataset.json", dst_root / "dataset.json")
+    if (src_root / "splits_final.json").exists():
+        shutil.copy(src_root / "splits_final.json", dst_root / "splits_final.json")
 
 if __name__ == "__main__":
     main()
