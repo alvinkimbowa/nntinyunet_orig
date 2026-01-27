@@ -96,7 +96,7 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
     model = nnunet_trainer.network.to(device)
     with open("model.txt", "w") as f:
         f.write(str(model))
-    return model, dataset_name
+    return model, dataset_name, nnunet_trainer.batch_size
 
 def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type):
     dataset = nnUNetDataset(
@@ -124,7 +124,6 @@ def main():
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
-    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out_csv", type=str, default="", help="append results to CSV file")
@@ -133,7 +132,7 @@ def main():
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
 
-    model, dataset_name = load_nnunet_model(
+    model, dataset_name, batch_size = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
@@ -146,7 +145,7 @@ def main():
         dataset_name,
         in_channels,
         args.split,
-        args.batch_size,
+        batch_size // 2 if batch_size > 1 else 1,
         args.fold,
         args.split_type,
     ).to(device)

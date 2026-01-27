@@ -313,7 +313,6 @@ if [ $score_net -eq 1 ]; then
         --gpu $gpu_id \
         --split $score_split \
         --split_type $score_split_type \
-        --batch_size $score_batch_size \
         --batches $score_batches \
         --out_csv "${score_out_csv}"
     
