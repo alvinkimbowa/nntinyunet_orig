@@ -296,10 +296,8 @@ if [ $analyze_model -eq 1 ]; then
 if [ $score_net -eq 1 ]; then
     score_split="Tr"
     score_split_type="train"
-    score_batch_size=4
     score_batches=1
     score_out_dir="results/naswot"
-    score_out_csv="${score_out_dir}/naswot_unet_widths.csv"
 
     mkdir -p "${score_out_dir}"
 
@@ -309,12 +307,10 @@ if [ $score_net -eq 1 ]; then
         --trainer $trainer \
         --cfg $cfg \
         --fold $fold \
-        --chk $chk \
         --gpu $gpu_id \
         --split $score_split \
         --split_type $score_split_type \
         --batches $score_batches \
-        --out_csv "${score_out_csv}"
-    
+        --out_dir $score_out_dir
     python plot_naswot_vs_params.py
 fi

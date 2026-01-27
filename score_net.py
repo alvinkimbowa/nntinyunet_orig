@@ -8,14 +8,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from batchgenerators.utilities.file_and_folder_operations import join
-from nnunetv2.paths import nnUNet_results, nnUNet_raw, nnUNet_preprocessed
-from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from nnunetv2.inference.variants.UNeXtPredictor import UNeXtPredictor
-from nnunetv2.inference.variants.MonaiPredictors import UNetPlusPlusPredictor, UNETRPredictor
 from nnunetv2.run.run_training import get_trainer_from_args
 
 from dataset import nnUNetDataset
 
+nnUNet_raw = os.environ['nnUNet_raw']
+nnUNet_results = os.environ['nnUNet_results']
 
 def _install_naswot_hooks(model, batch_size):
     handles = []
@@ -114,19 +112,18 @@ def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, spl
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute NASWOT score for a trained nnUNet model")
+    parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
     parser.add_argument("--train_dataset_id", type=int, required=True)
     parser.add_argument("--plans", type=str, required=True)
     parser.add_argument("--trainer", type=str, required=True)
     parser.add_argument("--cfg", type=str, required=True)
     parser.add_argument("--fold", type=str, default="0")
-    parser.add_argument("--chk", type=str, default="checkpoint_final.pth")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--out_csv", type=str, default="", help="append results to CSV file")
+    parser.add_argument("--out_dir", type=str, default="results/naswot")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -157,12 +154,13 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     line = f"params={params} naswot={avg}"
     print(line)
-    if args.out_csv:
-        need_header = not os.path.exists(args.out_csv) or os.path.getsize(args.out_csv) == 0
-        with open(args.out_csv, "a", encoding="utf-8") as f:
-            if need_header:
-                f.write("cfg,params,naswot\n")
-            f.write(f"{args.cfg},{params},{avg}\n")
+    out_file = join(args.out_dir, f"{dataset_name}_naswot.csv")
+    print("out_file", out_file)
+    need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
+    with open(out_file, "a", encoding="utf-8") as f:
+        if need_header:
+            f.write("cfg,params,naswot\n")
+        f.write(f"{args.cfg},{params},{avg}\n")
 
 
 if __name__ == "__main__":
