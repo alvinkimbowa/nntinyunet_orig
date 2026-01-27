@@ -23,6 +23,7 @@ preprocess=1
 train=1
 predict=0
 analyze_model=0
+score_net=1
 run_inference=0
 train_dataset_id=300
 test_dataset_ids=(300) #72 73 70 78 79) #8 70 79) #72 73 70 78)
@@ -292,13 +293,29 @@ if [ $analyze_model -eq 1 ]; then
         conda activate lightmunet
     fi
 
-    python analyze_model.py \
+if [ $score_net -eq 1 ]; then
+    score_split="Tr"
+    score_split_type="train"
+    score_batch_size=4
+    score_batches=1
+    score_out_dir="results/naswot"
+    score_out_csv="${score_out_dir}/naswot_unet_widths.csv"
+
+    mkdir -p "${score_out_dir}"
+
+    python score_net.py \
         --train_dataset_id $train_dataset_id \
-        --model_name $model_name \
         --plans $plans \
         --trainer $trainer \
-        --fold $fold \
         --cfg $cfg \
+        --fold $fold \
         --chk $chk \
-        --gpu $gpu_id
+        --gpu $gpu_id \
+        --split $score_split \
+        --split_type $score_split_type \
+        --batch_size $score_batch_size \
+        --batches $score_batches \
+        --out_csv "${score_out_csv}"
+    
+    python plot_naswot_vs_params.py
 fi

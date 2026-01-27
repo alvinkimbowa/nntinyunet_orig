@@ -1,69 +1,20 @@
 import argparse
+import json
+import os
 import random
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+
+from batchgenerators.utilities.file_and_folder_operations import join
+from nnunetv2.paths import nnUNet_results, nnUNet_raw, nnUNet_preprocessed
+from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from nnunetv2.inference.variants.UNeXtPredictor import UNeXtPredictor
+from nnunetv2.inference.variants.MonaiPredictors import UNetPlusPlusPredictor, UNETRPredictor
+from nnunetv2.run.run_training import get_trainer_from_args
+
 from dataset import nnUNetDataset
-
-class DoubleConv(nn.Module):
-    """2x (conv + relu)"""
-    def __init__(self, in_ch, out_ch):
-        super(DoubleConv, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.conv(x)
-
-class UNet(nn.Module):
-    def __init__(self, in_channels, out_channels, num_stages, features_start):
-        super(UNet, self).__init__()
-        features = features_start
-        self.down_layers = nn.ModuleList()
-        self.up_layers = nn.ModuleList()
-        self.pool = nn.MaxPool2d(2)
-
-        # Down path
-        self.down_layers.append(DoubleConv(in_channels, features))
-        feats = [features]
-        for _ in range(num_stages - 1):
-            self.down_layers.append(DoubleConv(features, features * 2))
-            features *= 2
-            feats.append(features)
-
-        # Up path
-        for i in range(num_stages - 1, 0, -1):
-            self.up_layers.append(nn.ConvTranspose2d(features, features // 2, kernel_size=2, stride=2))
-            self.up_layers.append(DoubleConv(features, features // 2))
-            features //= 2
-
-        self.final_conv = nn.Conv2d(features, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        encs = []
-        for down in self.down_layers:
-            x = down(x)
-            encs.append(x)
-            x = self.pool(x)
-        # bottom
-        x = encs.pop()
-        for idx in range(0, len(self.up_layers), 2):
-            x = self.up_layers[idx](x)
-            enc = encs.pop()
-            if x.shape != enc.shape:
-                diffY = enc.size()[2] - x.size()[2]
-                diffX = enc.size()[3] - x.size()[3]
-                x = nn.functional.pad(x, [diffX // 2, diffX - diffX // 2,
-                                          diffY // 2, diffY - diffY // 2])
-            x = torch.cat([enc, x], dim=1)
-            x = self.up_layers[idx+1](x)
-        x = self.final_conv(x)
-        return x
 
 
 def _install_naswot_hooks(model, batch_size):
@@ -87,7 +38,7 @@ def _install_naswot_hooks(model, batch_size):
         module.visited_backwards = True
 
     for module in model.modules():
-        if isinstance(module, nn.ReLU):
+        if isinstance(module, (nn.ReLU, nn.LeakyReLU)):
             if module.inplace:
                 module.inplace = False
             module.visited_backwards = False
@@ -105,6 +56,8 @@ def naswot_score(model, x):
     handles, K = _install_naswot_hooks(model, x.size(0))
     x = x.clone().requires_grad_(True)
     y = model(x)
+    if isinstance(y, (tuple, list)):
+        y = y[0]
     y.backward(torch.ones_like(y))
     _ = model(x.detach())
     for h in handles:
@@ -118,6 +71,32 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+
+def get_dataset_name(dataset_id):
+    dataset_id = str(dataset_id).zfill(3)
+    dataset_name = [
+        d for d in os.listdir(nnUNet_raw)
+        if d.startswith(f"Dataset{dataset_id}") and os.path.isdir(join(nnUNet_raw, d))
+    ]
+    if len(dataset_name) != 1:
+        raise RuntimeError(f"Found {len(dataset_name)} datasets with id {dataset_id}, expected 1")
+    return dataset_name[0]
+
+
+def get_num_input_channels(dataset_name):
+    with open(join(nnUNet_raw, dataset_name, "dataset.json"), "r") as f:
+        dataset_json = json.load(f)
+    return len(dataset_json["channel_names"])
+
+
+def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
+    dataset_name = get_dataset_name(train_dataset_id)
+    nnunet_trainer = get_trainer_from_args(dataset_name, cfg, fold, trainer, plans, device=device)
+    nnunet_trainer.initialize()
+    model = nnunet_trainer.network.to(device)
+    with open("model.txt", "w") as f:
+        f.write(str(model))
+    return model, dataset_name
 
 def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type):
     dataset = nnUNetDataset(
@@ -135,44 +114,56 @@ def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, spl
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute NASWOT score for a UNet width")
-    parser.add_argument("--width", type=int, default=16, help="base width")
-    parser.add_argument("--in_channels", type=int, default=1)
-    parser.add_argument("--out_channels", type=int, default=1)
-    parser.add_argument("--num_stages", type=int, default=5)
-    parser.add_argument("--image_size", type=int, default=224)
+    parser = argparse.ArgumentParser(description="Compute NASWOT score for a trained nnUNet model")
+    parser.add_argument("--train_dataset_id", type=int, required=True)
+    parser.add_argument("--plans", type=str, required=True)
+    parser.add_argument("--trainer", type=str, required=True)
+    parser.add_argument("--cfg", type=str, required=True)
+    parser.add_argument("--fold", type=str, default="0")
+    parser.add_argument("--chk", type=str, default="checkpoint_final.pth")
+    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
+    parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--dataset_name", type=str, default="", help="nnUNet dataset name (e.g. Dataset300_isic2018)")
-    parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
-    parser.add_argument("--fold", type=str, default="0")
-    parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
+    parser.add_argument("--out_csv", type=str, default="", help="append results to CSV file")
     args = parser.parse_args()
 
     set_seed(args.seed)
-    device = torch.device(args.device)
-    if args.dataset_name:
-        x = load_nnunet_batch(
-            args.dataset_name,
-            args.in_channels,
-            args.split,
-            args.batch_size,
-            args.fold,
-            args.split_type,
-        )
-    else:
-        x = torch.randn(args.batch_size, args.in_channels, args.image_size, args.image_size)
-    x = x.to(device)
+    device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
 
-    model = UNet(args.in_channels, args.out_channels, args.num_stages, args.width).to(device)
+    model, dataset_name = load_nnunet_model(
+        args.train_dataset_id,
+        args.plans,
+        args.trainer,
+        args.cfg,
+        args.fold,
+        device,
+    )
+    in_channels = get_num_input_channels(dataset_name)
+    x = load_nnunet_batch(
+        dataset_name,
+        in_channels,
+        args.split,
+        args.batch_size,
+        args.fold,
+        args.split_type,
+    ).to(device)
+
     scores = []
     for _ in range(args.batches):
         scores.append(naswot_score(model, x))
     avg = float(np.nanmean(scores))
     params = sum(p.numel() for p in model.parameters())
-    print(f"width={args.width} params={params} naswot={avg}")
+    line = f"params={params} naswot={avg}"
+    print(line)
+    if args.out_csv:
+        need_header = not os.path.exists(args.out_csv) or os.path.getsize(args.out_csv) == 0
+        with open(args.out_csv, "a", encoding="utf-8") as f:
+            if need_header:
+                f.write("cfg,params,naswot\n")
+            f.write(f"{args.cfg},{params},{avg}\n")
 
 
 if __name__ == "__main__":
