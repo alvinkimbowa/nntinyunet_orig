@@ -99,6 +99,20 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
     patch_size = nnunet_trainer.configuration_manager.patch_size
     return model, dataset_name, batch_size, patch_size
 
+
+class EncoderOnly(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        if not hasattr(model, "encoder"):
+            raise AttributeError("Model has no encoder attribute")
+
+    def forward(self, x):
+        out = self.model.encoder(x)
+        if isinstance(out, (list, tuple)):
+            return out[-1]
+        return out
+
 class ResizeTransform:
     def __init__(self, patch_size):
         self.patch_size = tuple(int(v) for v in patch_size)
@@ -143,6 +157,7 @@ def main():
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out_dir", type=str, default="results/naswot")
+    parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -156,6 +171,8 @@ def main():
         args.fold,
         device,
     )
+    if args.encoder_only:
+        model = EncoderOnly(model).to(device)
     in_channels = get_num_input_channels(dataset_name)
     x = load_nnunet_batch(
         dataset_name,
@@ -174,7 +191,10 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     line = f"params={params} naswot={avg}"
     print(line)
-    out_file = join(args.out_dir, f"{dataset_name}_naswot.csv")
+    if args.encoder_only:
+        out_file = join(args.out_dir, f"{dataset_name}_naswot_encoder_only.csv")
+    else:
+        out_file = join(args.out_dir, f"{dataset_name}_naswot.csv")
     print("out_file", out_file)
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:

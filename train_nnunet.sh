@@ -311,6 +311,7 @@ if [ $score_net -eq 1 ]; then
         --split $score_split \
         --split_type $score_split_type \
         --batches $score_batches \
-        --out_dir $score_out_dir
+        --out_dir $score_out_dir \
+        --encoder_only
     python plot_naswot_vs_params.py
 fi
