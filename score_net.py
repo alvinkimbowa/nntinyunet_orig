@@ -3,6 +3,8 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
+from dataset import nnUNetDataset
 
 class DoubleConv(nn.Module):
     """2x (conv + relu)"""
@@ -117,6 +119,21 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
+def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type):
+    dataset = nnUNetDataset(
+        dataset_name=dataset_name,
+        input_channels=input_channels,
+        split=split,
+        fold=fold,
+        split_type=split_type,
+        transform=None,
+        eval=False,
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    imgs, _, _ = next(iter(loader))
+    return imgs.float()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compute NASWOT score for a UNet width")
     parser.add_argument("--width", type=int, default=16, help="base width")
@@ -128,18 +145,34 @@ def main():
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--dataset_name", type=str, default="", help="nnUNet dataset name (e.g. Dataset300_isic2018)")
+    parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
+    parser.add_argument("--fold", type=str, default="0")
+    parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = torch.device(args.device)
-    x = torch.randn(args.batch_size, args.in_channels, args.image_size, args.image_size, device=device)
+    if args.dataset_name:
+        x = load_nnunet_batch(
+            args.dataset_name,
+            args.in_channels,
+            args.split,
+            args.batch_size,
+            args.fold,
+            args.split_type,
+        )
+    else:
+        x = torch.randn(args.batch_size, args.in_channels, args.image_size, args.image_size)
+    x = x.to(device)
 
     model = UNet(args.in_channels, args.out_channels, args.num_stages, args.width).to(device)
     scores = []
     for _ in range(args.batches):
         scores.append(naswot_score(model, x))
     avg = float(np.nanmean(scores))
-    print(f"width={args.width} naswot={avg}")
+    params = sum(p.numel() for p in model.parameters())
+    print(f"width={args.width} params={params} naswot={avg}")
 
 
 if __name__ == "__main__":
