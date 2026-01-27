@@ -69,7 +69,7 @@ class nnUNetDataset(torch.utils.data.Dataset):
             if not other_chs:
                 # Scenario 3: input_channels=1, only 1 image available (no other_chs)
                 # Load image as RGB
-                img = cv2.imread(img_filename)
+                img = cv2.imread(img_filename, cv2.IMREAD_GRAYSCALE)[..., None]
             else:
                 # Scenario 4: input_channels=1, all 3 images available (load all chs then convert to grayscale)
                 # Load all 3 images as single-channel, concatenate and then convert to grayscale

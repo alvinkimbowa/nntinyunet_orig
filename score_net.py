@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torchvision.transforms import Resize, InterpolationMode
 
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
@@ -94,16 +95,34 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
     model = nnunet_trainer.network.to(device)
     with open("model.txt", "w") as f:
         f.write(str(model))
-    return model, dataset_name, nnunet_trainer.batch_size
+    batch_size = nnunet_trainer.batch_size
+    patch_size = nnunet_trainer.configuration_manager.patch_size
+    return model, dataset_name, batch_size, patch_size
 
-def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type):
+class ResizeTransform:
+    def __init__(self, patch_size):
+        self.patch_size = tuple(int(v) for v in patch_size)
+        self._img_resize = Resize(self.patch_size, antialias=True)
+        self._mask_resize = Resize(self.patch_size, interpolation=InterpolationMode.NEAREST)
+
+    def __call__(self, image, mask):
+        img = torch.as_tensor(image).permute(2, 0, 1).float()
+        msk = torch.as_tensor(mask).permute(2, 0, 1).float()
+        img = self._img_resize(img)
+        msk = self._mask_resize(msk)
+        img = img.permute(1, 2, 0).numpy()
+        msk = msk.permute(1, 2, 0).numpy()
+        return {"image": img, "mask": msk}
+
+
+def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type, patch_size):
     dataset = nnUNetDataset(
         dataset_name=dataset_name,
         input_channels=input_channels,
         split=split,
         fold=fold,
         split_type=split_type,
-        transform=None,
+        transform=ResizeTransform(patch_size),
         eval=False,
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -129,7 +148,7 @@ def main():
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
 
-    model, dataset_name, batch_size = load_nnunet_model(
+    model, dataset_name, batch_size, patch_size = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
@@ -145,6 +164,7 @@ def main():
         batch_size // 2 if batch_size > 1 else 1,
         args.fold,
         args.split_type,
+        patch_size,
     ).to(device)
 
     scores = []
