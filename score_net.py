@@ -12,6 +12,13 @@ from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
 
 from dataset import nnUNetDataset
+from at_init_metrics import (
+    synflow_score,
+    gradnorm_score,
+    snip_score,
+    jacobian_score,
+    fisher_score,
+)
 
 nnUNet_raw = os.environ['nnUNet_raw']
 nnUNet_results = os.environ['nnUNet_results']
@@ -185,25 +192,49 @@ def main():
     )
 
     scores = []
+    synflow_scores = []
+    gradnorm_scores = []
+    snip_scores = []
+    jacobian_scores = []
+    fisher_scores = []
     for i, (imgs, _, _) in enumerate(loader):
         if i >= args.batches:
             break
         x = imgs.float().to(device)
         scores.append(naswot_score(model, x))
+        synflow_scores.append(
+            synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
+        )
+        gradnorm_scores.append(gradnorm_score(model, x))
+        snip_scores.append(snip_score(model, x))
+        jacobian_scores.append(jacobian_score(model, x))
+        fisher_scores.append(fisher_score(model, x))
     avg = float(np.nanmean(scores))
+    synflow_avg = float(np.nanmean(synflow_scores))
+    gradnorm_avg = float(np.nanmean(gradnorm_scores))
+    snip_avg = float(np.nanmean(snip_scores))
+    jacobian_avg = float(np.nanmean(jacobian_scores))
+    fisher_avg = float(np.nanmean(fisher_scores))
     params = sum(p.numel() for p in model.parameters())
-    line = f"params={params} naswot={avg}"
+    line = (
+        f"params={params} naswot={avg} synflow={synflow_avg} "
+        f"gradnorm={gradnorm_avg} snip={snip_avg} "
+        f"jacobian={jacobian_avg} fisher={fisher_avg}"
+    )
     print(line)
     if args.encoder_only:
-        out_file = join(args.out_dir, f"{dataset_name}_naswot_encoder_only_b{args.batches}.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_metrics_encoder_only_b{args.batches}.csv")
     else:
-        out_file = join(args.out_dir, f"{dataset_name}_naswot_b{args.batches}.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_metrics_b{args.batches}.csv")
     print("out_file", out_file)
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
         if need_header:
-            f.write("cfg,params,naswot\n")
-        f.write(f"{args.cfg},{params},{avg}\n")
+            f.write("cfg,params,naswot,synflow,gradnorm,snip,jacobian,fisher\n")
+        f.write(
+            f"{args.cfg},{params},{avg},{synflow_avg},"
+            f"{gradnorm_avg},{snip_avg},{jacobian_avg},{fisher_avg}\n"
+        )
 
 
 if __name__ == "__main__":
