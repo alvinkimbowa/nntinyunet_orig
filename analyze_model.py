@@ -2,13 +2,9 @@ import argparse
 import json
 import os
 import torch
-import copy
 from batchgenerators.utilities.file_and_folder_operations import join
-from nnunetv2.paths import nnUNet_results, nnUNet_raw, nnUNet_preprocessed
-from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from nnunetv2.inference.variants.UNeXtPredictor import UNeXtPredictor
-from nnunetv2.inference.variants.MonaiPredictors import UNetPlusPlusPredictor, UNETRPredictor
-from nnunetv2.inference.variants.LightMUNetPredictor import LightMUNetPredictor
+from nnunetv2.paths import nnUNet_results, nnUNet_raw
+from nnunetv2.run.run_training import get_trainer_from_args
 from nnunetv2.training.nnUNetTrainer.variants.network_architecture.mono.mono_layer import Mono2D, Mono2DV2
 import torchprofile
 import numpy as np
@@ -16,12 +12,10 @@ import numpy as np
 def parse_args():
     parser = argparse.ArgumentParser(description="Analyze model parameters and FLOPs")
     parser.add_argument("--train_dataset_id", type=int, required=True)
-    parser.add_argument("--model_name", type=str, required=True)
     parser.add_argument("--plans", type=str, required=True)
     parser.add_argument("--trainer", type=str, default="nnUNetTrainer")
     parser.add_argument("--fold", type=str, default="all")
     parser.add_argument("--cfg", type=str, default="2d")
-    parser.add_argument("--chk", type=str, default="checkpoint_final.pth")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--save_metrics", type=str2bool, default=True,
                        help="Save metrics to JSON file")
@@ -49,20 +43,6 @@ def get_dataset_name(nnUNet_raw, dataset_id):
     return dataset_name[0]
 
 
-def get_predictor_class(trainer):
-    """Get the appropriate predictor class based on trainer name"""
-    if "UNeXtTrainer" in trainer:
-        return UNeXtPredictor
-    elif trainer == "UNetPlusPlusTrainer":
-        return UNetPlusPlusPredictor
-    elif trainer == "UNETRTrainer":
-        return UNETRPredictor
-    elif trainer == "nnUNetTrainerLightMUNet":
-        return LightMUNetPredictor
-    else:
-        return nnUNetPredictor
-
-
 def get_mono2d_macs(n, x):
     """
     Estimate the total MACs used by Mono2D_v2 on input x (shape: [C, H, W])
@@ -82,54 +62,25 @@ def get_mono2d_macs(n, x):
     return macs.item()
 
 
-def analyze_model(model_dir, trainer, fold, chk, gpu, save_metrics=True):
-    """Analyze model parameters and FLOPs"""
-    
-    # Load plans to get input size
-    plans_path = join(model_dir, "plans.json")
-    with open(plans_path, 'r') as f:
-        plans = json.load(f)
-    # Get patch size from plans (assuming 2d configuration)
-    input_size = plans["configurations"]["2d"]["patch_size"]
-    print(f"Using input size from plans: {input_size[0]}x{input_size[1]}")
+def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
+    dataset_name = get_dataset_name(nnUNet_raw, train_dataset_id)
+    nnunet_trainer = get_trainer_from_args(dataset_name, cfg, fold, trainer, plans, device=device)
+    nnunet_trainer.initialize()
+    model = nnunet_trainer.network.to(device)
+    in_channels = nnunet_trainer.num_input_channels
+    patch_size = nnunet_trainer.configuration_manager.patch_size
+    return model, dataset_name, in_channels, patch_size
 
-    with open(join(model_dir, "dataset.json"), "r") as f:
-        dataset = json.load(f)
-    in_channels = len(dataset["channel_names"])
+
+def analyze_model(model, dataset_name, input_size, in_channels, model_dir, gpu, save_metrics=True):
+    """Analyze model parameters and FLOPs"""
+    print(f"Using input size from plans: {input_size[0]}x{input_size[1]}")
     print(f"Using input channels from dataset: {in_channels}")
-    
-    # Set device
+
     if gpu < 0:
         device = torch.device('cpu')
     else:
         device = torch.device('cuda')
-    
-    # Get predictor class
-    predictor_class = get_predictor_class(trainer)
-    
-    # Initialize predictor
-    predictor = predictor_class(
-        tile_step_size=0.5,
-        use_gaussian=True,
-        use_mirroring=True,
-        perform_everything_on_device=True,
-        device=device,
-        verbose=False,
-        verbose_preprocessing=False,
-        allow_tqdm=False
-    )
-    
-    # Initialize from trained model
-    # use_folds = (0 if fold == "all" else int(fold),)
-    use_folds = fold
-    predictor.initialize_from_trained_model_folder(
-        model_dir,
-        use_folds=use_folds,
-        checkpoint_name=chk,
-    )
-    
-    # Get the network
-    model = copy.deepcopy(predictor.network)
     model = model.to(device)
     model.eval()
     
@@ -157,9 +108,6 @@ def analyze_model(model_dir, trainer, fold, chk, gpu, save_metrics=True):
     print(f"MODEL ANALYSIS RESULTS")
     print(f"{'='*60}")
     print(f"Model directory: {model_dir}")
-    print(f"Trainer: {trainer}")
-    print(f"Fold: {fold}")
-    print(f"Checkpoint: {chk}")
     print(f"Input size: {input_size[0]}x{input_size[1]}")
     print(f"Device: {device}")
     print(f"{'='*60}")
@@ -175,9 +123,7 @@ def analyze_model(model_dir, trainer, fold, chk, gpu, save_metrics=True):
     # Prepare metrics dictionary
     metrics = {
         "model_dir": model_dir,
-        "trainer": trainer,
-        "fold": fold,
-        "checkpoint": chk,
+        "dataset_name": dataset_name,
         "input_size": input_size,
         "device": str(device),
         "parameters": {
@@ -206,29 +152,31 @@ def analyze_model(model_dir, trainer, fold, chk, gpu, save_metrics=True):
 def main():
     args = parse_args()
     
-    # Get dataset name
-    train_dataset_name = get_dataset_name(nnUNet_raw, args.train_dataset_id)
-    
-    # Construct model directory
-    model_dir = join(nnUNet_results, train_dataset_name, f'{args.trainer}__{args.plans}__{args.cfg}')
-    
+    device = torch.device('cpu' if args.gpu < 0 else f'cuda:{args.gpu}')
+    model, dataset_name, in_channels, patch_size = load_nnunet_model(
+        args.train_dataset_id,
+        args.plans,
+        args.trainer,
+        args.cfg,
+        args.fold,
+        device,
+    )
+    model_dir = join(nnUNet_results, dataset_name, f'{args.trainer}__{args.plans}__{args.cfg}')
+    if not os.path.exists(model_dir) and args.save_metrics:
+        os.makedirs(model_dir, exist_ok=True)
+
     print(f"Analyzing model...")
-    print(f"Dataset: {train_dataset_name}")
+    print(f"Dataset: {dataset_name}")
     print(f"Model directory: {model_dir}")
-    
-    # Check if model directory exists
-    if not os.path.exists(model_dir):
-        print(f"Error: Model directory {model_dir} does not exist!")
-        return
-    
-    # Analyze the model
+
     metrics = analyze_model(
+        model=model,
+        dataset_name=dataset_name,
+        input_size=patch_size,
+        in_channels=in_channels,
         model_dir=model_dir,
-        trainer=args.trainer,
-        fold=args.fold,
-        chk=args.chk,
         gpu=args.gpu,
-        save_metrics=args.save_metrics
+        save_metrics=args.save_metrics,
     )
     
     return metrics
