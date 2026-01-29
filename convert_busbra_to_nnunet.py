@@ -30,7 +30,6 @@ def _process_one(
 ) -> str:
     img_path, lbl_path, dst_r_path, dst_g_path, dst_b_path, dst_lbl_path, numbered = task
     with Image.open(img_path) as im:
-        im = im.resize((256, 256), Image.BILINEAR)
         # Save single-channel if source is grayscale
         if im.mode in ("L", "I;16", "I"):
             im.convert("L").save(dst_r_path)
@@ -41,7 +40,6 @@ def _process_one(
             g.save(dst_g_path)
             b.save(dst_b_path)
     with Image.open(lbl_path) as lb:
-        lb = lb.resize((256, 256), Image.NEAREST)
         lb = lb.convert("L").point(lambda p: 1 if p > 0 else 0, mode="L")
         lb.save(dst_lbl_path)
     return numbered
