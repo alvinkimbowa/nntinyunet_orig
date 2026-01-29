@@ -30,7 +30,9 @@ def _install_naswot_hooks(model, batch_size):
             K = x @ x.t()
             K2 = (1.0 - x) @ (1.0 - x.t())
             K_accum[:] = K_accum + K.cpu().numpy() + K2.cpu().numpy()
-        except Exception:
+        except Exception as e:
+            print("Error in forward hook")
+            print(e)
             pass
 
     def backward_hook(module, *_):
