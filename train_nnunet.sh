@@ -307,7 +307,7 @@ if [ $score_net -eq 1 ]; then
     score_split_type="train"
     score_batches=1
     score_out_dir="results/nas_metrics"
-
+    seed=1
     mkdir -p "${score_out_dir}"
 
     python score_net.py \
@@ -320,5 +320,6 @@ if [ $score_net -eq 1 ]; then
         --split $score_split \
         --split_type $score_split_type \
         --batches $score_batches \
-        --out_dir $score_out_dir
+        --out_dir $score_out_dir \
+        --seed $seed
 fi
