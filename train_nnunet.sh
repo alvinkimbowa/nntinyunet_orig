@@ -293,6 +293,15 @@ if [ $analyze_model -eq 1 ]; then
         conda activate lightmunet
     fi
 
+    python analyze_model.py \
+        --train_dataset_id $train_dataset_id \
+        --plans $plans \
+        --trainer $trainer \
+        --fold $fold \
+        --cfg $cfg \
+        --gpu $gpu_id
+fi
+
 if [ $score_net -eq 1 ]; then
     score_split="Tr"
     score_split_type="train"
