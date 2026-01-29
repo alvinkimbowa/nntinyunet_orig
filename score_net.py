@@ -129,7 +129,7 @@ class ResizeTransform:
         return {"image": img, "mask": msk}
 
 
-def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, split_type, patch_size):
+def load_nnunet_loader(dataset_name, input_channels, split, batch_size, fold, split_type, patch_size):
     dataset = nnUNetDataset(
         dataset_name=dataset_name,
         input_channels=input_channels,
@@ -139,9 +139,7 @@ def load_nnunet_batch(dataset_name, input_channels, split, batch_size, fold, spl
         transform=ResizeTransform(patch_size),
         eval=False,
     )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    imgs, _, _ = next(iter(loader))
-    return imgs.float()
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
 
 def main():
@@ -174,7 +172,7 @@ def main():
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
     in_channels = get_num_input_channels(dataset_name)
-    x = load_nnunet_batch(
+    loader = load_nnunet_loader(
         dataset_name,
         in_channels,
         args.split,
@@ -182,19 +180,22 @@ def main():
         args.fold,
         args.split_type,
         patch_size,
-    ).to(device)
+    )
 
     scores = []
-    for _ in range(args.batches):
+    for i, (imgs, _, _) in enumerate(loader):
+        if i >= args.batches:
+            break
+        x = imgs.float().to(device)
         scores.append(naswot_score(model, x))
     avg = float(np.nanmean(scores))
     params = sum(p.numel() for p in model.parameters())
     line = f"params={params} naswot={avg}"
     print(line)
     if args.encoder_only:
-        out_file = join(args.out_dir, f"{dataset_name}_naswot_encoder_only.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_naswot_encoder_only_b{args.batches}.csv")
     else:
-        out_file = join(args.out_dir, f"{dataset_name}_naswot.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_naswot_b{args.batches}.csv")
     print("out_file", out_file)
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
