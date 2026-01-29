@@ -297,7 +297,7 @@ if [ $score_net -eq 1 ]; then
     score_split="Tr"
     score_split_type="train"
     score_batches=1
-    score_out_dir="results/naswot"
+    score_out_dir="results/nas_metrics"
 
     mkdir -p "${score_out_dir}"
 
