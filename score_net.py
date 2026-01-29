@@ -106,7 +106,8 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
         f.write(str(model))
     batch_size = nnunet_trainer.batch_size
     patch_size = nnunet_trainer.configuration_manager.patch_size
-    return model, dataset_name, batch_size, patch_size
+    loss_fn = nnunet_trainer.loss
+    return model, dataset_name, batch_size, patch_size, loss_fn
 
 
 class EncoderOnly(nn.Module):
@@ -170,7 +171,7 @@ def main():
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
 
-    model, dataset_name, batch_size, patch_size = load_nnunet_model(
+    model, dataset_name, batch_size, patch_size, loss_fn = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
@@ -197,7 +198,7 @@ def main():
     snip_scores = []
     jacobian_scores = []
     fisher_scores = []
-    for i, (imgs, _, _) in enumerate(loader):
+    for i, (imgs, targets, _) in enumerate(loader):
         if i >= args.batches:
             break
         x = imgs.float().to(device)
@@ -207,7 +208,7 @@ def main():
         )
         gradnorm_scores.append(gradnorm_score(model, x))
         snip_scores.append(snip_score(model, x))
-        jacobian_scores.append(jacobian_score(model, x))
+        jacobian_scores.append(jacobian_score(model, x, targets, loss_fn))
         fisher_scores.append(fisher_score(model, x))
     avg = float(np.nanmean(scores))
     synflow_avg = float(np.nanmean(synflow_scores))

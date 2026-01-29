@@ -62,12 +62,15 @@ def snip_score(model, x):
     return float(score)
 
 
-def jacobian_score(model, x):
+def jacobian_score(model, x, y=None, loss_fn=None):
     model.zero_grad(set_to_none=True)
     x = x.clone().requires_grad_(True)
     y = model(x)
     y = _get_output_tensor(y)
     loss = y.float().sum()
+    # loss = y.float().mean()
+    # loss = (y ** 2).mean()
+    # loss = loss_fn(y, y)
     grad = torch.autograd.grad(loss, x, retain_graph=False, create_graph=False)[0]
     return float(grad.norm().item())
 
