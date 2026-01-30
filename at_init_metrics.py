@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 
@@ -10,6 +11,55 @@ def _get_output_tensor(y):
 def _scalar_loss_from_output(y):
     y = _get_output_tensor(y)
     return y.float().mean()
+
+
+def _install_naswot_hooks(model, batch_size):
+    handles = []
+    K_accum = np.zeros((batch_size, batch_size), dtype=np.float32)
+
+    def forward_hook(module, inp, _):
+        try:
+            if not getattr(module, "visited_backwards", False):
+                return
+            x = inp[0]
+            x = x.view(x.size(0), -1)
+            x = (x > 0).float()
+            K = x @ x.t()
+            K2 = (1.0 - x) @ (1.0 - x.t())
+            K_accum[:] = K_accum + K.cpu().numpy() + K2.cpu().numpy()
+        except Exception:
+            pass
+
+    def backward_hook(module, *_):
+        module.visited_backwards = True
+
+    for module in model.modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
+            if module.inplace:
+                module.inplace = False
+            module.visited_backwards = False
+            handles.append(module.register_forward_hook(forward_hook))
+            if hasattr(module, "register_full_backward_hook"):
+                handles.append(module.register_full_backward_hook(backward_hook))
+            else:
+                handles.append(module.register_backward_hook(backward_hook))
+
+    return handles, K_accum
+
+
+def naswot_score(model, x):
+    model.zero_grad(set_to_none=True)
+    handles, K = _install_naswot_hooks(model, x.size(0))
+    x = x.clone().requires_grad_(True)
+    y = model(x)
+    if isinstance(y, (tuple, list)):
+        y = y[0]
+    y.backward(torch.ones_like(y))
+    _ = model(x.detach())
+    for h in handles:
+        h.remove()
+    _, logdet = np.linalg.slogdet(K)
+    return float(logdet)
 
 
 def synflow_score(model, input_shape, device):
