@@ -155,9 +155,12 @@ def main():
     jacobian_scores = []
     fisher_scores = []
     breakdown_done = False
+    batch_rows = []
+    for i, (imgs, targets, meta) in tqdm(enumerate(loader), total=args.batches):
         if i >= args.batches:
             break
         x = imgs.float().to(device)
+        targets = targets.to(device)
         scores.append(naswot_score(model, x))
         if args.naswot_breakdown and not breakdown_done:
             breakdown_done = True
@@ -169,8 +172,23 @@ def main():
         )
         gradnorm_scores.append(gradnorm_score(model, x))
         snip_scores.append(snip_score(model, x))
-        jacobian_scores.append(jacobian_score(model, x, targets, loss_fn))
+        jac = jacobian_score(model, x, targets, loss_fn)
+        jacobian_scores.append(jac)
         fisher_scores.append(fisher_score(model, x))
+        if args.save_batch_jacobian:
+            img_ids = meta["img_id"] if isinstance(meta, dict) else meta.get("img_id")
+            if isinstance(img_ids, (list, tuple)):
+                img_ids = ";".join(img_ids)
+            batch_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "cfg": args.cfg,
+                    "batch": i,
+                    "jacobian": jac,
+                    "img_ids": img_ids,
+                    "seed": args.seed,
+                }
+            )
     avg = float(np.nanmean(scores))
     synflow_avg = float(np.nanmean(synflow_scores))
     gradnorm_avg = float(np.nanmean(gradnorm_scores))
@@ -215,6 +233,18 @@ def main():
             f.write("block,logdet\n")
             for name, val in block_scores:
                 f.write(f"{name},{val}\n")
+
+    if args.save_batch_jacobian and batch_rows:
+        batch_path = join(args.out_dir, f"{dataset_name}_batch_jacobian_b{args.batches}.csv")
+        need_header = not os.path.exists(batch_path) or os.path.getsize(batch_path) == 0
+        with open(batch_path, "a", encoding="utf-8") as f:
+            if need_header:
+                f.write("dataset,cfg,batch,jacobian,img_ids,seed\n")
+            for row in batch_rows:
+                f.write(
+                    f"{row['dataset']},{row['cfg']},{row['batch']},"
+                    f"{row['jacobian']},{row['img_ids']},{row['seed']}\n"
+                )
 
 
 if __name__ == "__main__":
