@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import Resize, InterpolationMode
-
+from tqdm import tqdm
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
 
@@ -115,6 +115,10 @@ def main():
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out_dir", type=str, default="results/naswot")
+    parser.add_argument("--naswot_breakdown", action="store_true",
+                        help="save per-module and aggregated NASWOT contributions")
+    parser.add_argument("--save_batch_jacobian", action="store_true",
+                        help="save per-batch jacobian with image ids")
     parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
     args = parser.parse_args()
 
@@ -148,7 +152,7 @@ def main():
     snip_scores = []
     jacobian_scores = []
     fisher_scores = []
-    for i, (imgs, targets, _) in enumerate(loader):
+    for i, (imgs, targets, _) in tqdm(enumerate(loader), total=args.batches):
         if i >= args.batches:
             break
         x = imgs.float().to(device)
