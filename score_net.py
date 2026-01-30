@@ -14,6 +14,8 @@ from nnunetv2.run.run_training import get_trainer_from_args
 from dataset import nnUNetDataset
 from at_init_metrics import (
     naswot_score,
+    naswot_module_contributions,
+    aggregate_naswot_contributions,
     synflow_score,
     gradnorm_score,
     snip_score,
@@ -152,11 +154,16 @@ def main():
     snip_scores = []
     jacobian_scores = []
     fisher_scores = []
-    for i, (imgs, targets, _) in tqdm(enumerate(loader), total=args.batches):
+    breakdown_done = False
         if i >= args.batches:
             break
         x = imgs.float().to(device)
         scores.append(naswot_score(model, x))
+        if args.naswot_breakdown and not breakdown_done:
+            breakdown_done = True
+            module_scores = naswot_module_contributions(model, x)
+            stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
+            block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
         synflow_scores.append(
             synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
         )
@@ -190,6 +197,24 @@ def main():
             f"{args.cfg},{params},{avg},{synflow_avg},"
             f"{gradnorm_avg},{snip_avg},{jacobian_avg},{fisher_avg}\n"
         )
+    
+    if args.naswot_breakdown and breakdown_done:
+        suffix = f"{dataset_name}_{args.cfg}_b{args.batches}"
+        mod_path = join(args.out_dir, f"{suffix}_naswot_modules.csv")
+        stage_path = join(args.out_dir, f"{suffix}_naswot_stages.csv")
+        block_path = join(args.out_dir, f"{suffix}_naswot_blocks.csv")
+        with open(mod_path, "w", encoding="utf-8") as f:
+            f.write("module,logdet\n")
+            for name, val in module_scores:
+                f.write(f"{name},{val}\n")
+        with open(stage_path, "w", encoding="utf-8") as f:
+            f.write("stage,logdet\n")
+            for name, val in stage_scores:
+                f.write(f"{name},{val}\n")
+        with open(block_path, "w", encoding="utf-8") as f:
+            f.write("block,logdet\n")
+            for name, val in block_scores:
+                f.write(f"{name},{val}\n")
 
 
 if __name__ == "__main__":
