@@ -122,10 +122,17 @@ def main():
     parser.add_argument("--save_batch_jacobian", action="store_true",
                         help="save per-batch jacobian with image ids")
     parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        default="naswot,synflow,gradnorm,snip,jacobian,fisher",
+        help="comma-separated list of metrics to compute",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
+    metric_set = {m.strip().lower() for m in args.metrics.split(",") if m.strip()}
 
     model, dataset_name, batch_size, patch_size, loss_fn = load_nnunet_model(
         args.train_dataset_id,
@@ -161,40 +168,46 @@ def main():
             break
         x = imgs.float().to(device)
         targets = targets.to(device)
-        scores.append(naswot_score(model, x))
-        if args.naswot_breakdown and not breakdown_done:
-            breakdown_done = True
-            module_scores = naswot_module_contributions(model, x)
-            stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
-            block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
-        synflow_scores.append(
-            synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
-        )
-        gradnorm_scores.append(gradnorm_score(model, x))
-        snip_scores.append(snip_score(model, x))
-        jac = jacobian_score(model, x, targets, loss_fn)
-        jacobian_scores.append(jac)
-        fisher_scores.append(fisher_score(model, x))
-        if args.save_batch_jacobian:
-            img_ids = meta["img_id"] if isinstance(meta, dict) else meta.get("img_id")
-            if isinstance(img_ids, (list, tuple)):
-                img_ids = ";".join(img_ids)
-            batch_rows.append(
-                {
-                    "dataset": dataset_name,
-                    "cfg": args.cfg,
-                    "batch": i,
-                    "jacobian": jac,
-                    "img_ids": img_ids,
-                    "seed": args.seed,
-                }
+        if "naswot" in metric_set:
+            scores.append(naswot_score(model, x))
+            if args.naswot_breakdown and not breakdown_done:
+                breakdown_done = True
+                module_scores = naswot_module_contributions(model, x)
+                stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
+                block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
+        if "synflow" in metric_set:
+            synflow_scores.append(
+                synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
             )
-    avg = float(np.nanmean(scores))
-    synflow_avg = float(np.nanmean(synflow_scores))
-    gradnorm_avg = float(np.nanmean(gradnorm_scores))
-    snip_avg = float(np.nanmean(snip_scores))
-    jacobian_avg = float(np.nanmean(jacobian_scores))
-    fisher_avg = float(np.nanmean(fisher_scores))
+        if "gradnorm" in metric_set:
+            gradnorm_scores.append(gradnorm_score(model, x))
+        if "snip" in metric_set:
+            snip_scores.append(snip_score(model, x))
+        if "fisher" in metric_set:
+            fisher_scores.append(fisher_score(model, x))
+        if "jacobian" in metric_set:
+            jac = jacobian_score(model, x, targets, loss_fn)
+            jacobian_scores.append(jac)
+            if args.save_batch_jacobian:
+                img_ids = meta["img_id"] if isinstance(meta, dict) else meta.get("img_id")
+                if isinstance(img_ids, (list, tuple)):
+                    img_ids = ";".join(img_ids)
+                batch_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "cfg": args.cfg,
+                        "batch": i,
+                        "jacobian": jac,
+                        "img_ids": img_ids,
+                        "seed": args.seed,
+                    }
+                )
+    avg = float(np.nanmean(scores)) if scores else float("nan")
+    synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
+    gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")
+    snip_avg = float(np.nanmean(snip_scores)) if snip_scores else float("nan")
+    jacobian_avg = float(np.nanmean(jacobian_scores)) if jacobian_scores else float("nan")
+    fisher_avg = float(np.nanmean(fisher_scores)) if fisher_scores else float("nan")
     params = sum(p.numel() for p in model.parameters())
     line = (
         f"params={params} naswot={avg} synflow={synflow_avg} "
