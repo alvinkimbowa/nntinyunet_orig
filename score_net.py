@@ -155,7 +155,7 @@ def main():
         patch_size,
     )
 
-    scores = []
+    naswot_scores = []
     synflow_scores = []
     gradnorm_scores = []
     snip_scores = []
@@ -169,7 +169,7 @@ def main():
         x = imgs.float().to(device)
         targets = targets.to(device)
         if "naswot" in metric_set:
-            scores.append(naswot_score(model, x))
+            naswot_scores.append(naswot_score(model, x))
             if args.naswot_breakdown and not breakdown_done:
                 breakdown_done = True
                 module_scores = naswot_module_contributions(model, x)
@@ -202,7 +202,7 @@ def main():
                         "seed": args.seed,
                     }
                 )
-    avg = float(np.nanmean(scores)) if scores else float("nan")
+    naswot_avg = float(np.nanmean(naswot_scores)) if naswot_scores else float("nan")
     synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
     gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")
     snip_avg = float(np.nanmean(snip_scores)) if snip_scores else float("nan")
@@ -210,7 +210,7 @@ def main():
     fisher_avg = float(np.nanmean(fisher_scores)) if fisher_scores else float("nan")
     params = sum(p.numel() for p in model.parameters())
     line = (
-        f"params={params} naswot={avg} synflow={synflow_avg} "
+        f"params={params} naswot={naswot_avg} synflow={synflow_avg} "
         f"gradnorm={gradnorm_avg} snip={snip_avg} "
         f"jacobian={jacobian_avg} fisher={fisher_avg}"
     )
@@ -225,7 +225,7 @@ def main():
         if need_header:
             f.write("cfg,params,naswot,synflow,gradnorm,snip,jacobian,fisher\n")
         f.write(
-            f"{args.cfg},{params},{avg},{synflow_avg},"
+            f"{args.cfg},{params},{naswot_avg},{synflow_avg},"
             f"{gradnorm_avg},{snip_avg},{jacobian_avg},{fisher_avg}\n"
         )
     
