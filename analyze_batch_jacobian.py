@@ -57,11 +57,14 @@ def main():
     dice_series = pd.Series(dice_map)
 
     rows = []
-    for (batch_id, img_ids), g in df.groupby(["batch", "img_ids"]):
+    for batch_id, g in df.groupby("batch"):
+        if g["cfg"].duplicated().any():
+            raise SystemExit(f"Duplicate cfgs found in batch {batch_id}.")
         jac = g.set_index("cfg")["jacobian"]
         jac = jac.reindex(args.cfgs)
         if jac.isna().any():
             continue
+        img_ids = g["img_ids"].iloc[0]
         pearson = jac.corr(dice_series, method="pearson")
         spearman = jac.corr(dice_series, method="spearman")
         rows.append(
@@ -73,6 +76,8 @@ def main():
             }
         )
 
+    if not rows:
+        raise SystemExit("No valid batches found. Check cfg coverage and batch_jacobian file contents.")
     out_df = pd.DataFrame(rows).sort_values("spearman", ascending=False)
     out_path = Path(args.nas_dir) / f"{dataset_name}_batch_jacobian_corr_b{args.batches}.csv"
     out_df.to_csv(out_path, index=False)
