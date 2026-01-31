@@ -101,7 +101,7 @@ def load_nnunet_loader(dataset_name, input_channels, split, batch_size, fold, sp
         transform=ResizeTransform(patch_size),
         eval=False,
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
 
 
 def main():
