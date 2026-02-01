@@ -148,7 +148,6 @@ def main():
         targets = batch['target']
         meta = batch['keys']
         x = imgs.float().to(device)
-        targets = targets.to(device)
         if "naswot" in metric_set:
             naswot_scores.append(naswot_score(model, x))
             if args.naswot_breakdown and not breakdown_done:
