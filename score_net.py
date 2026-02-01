@@ -195,6 +195,7 @@ def main():
         f"gradnorm={gradnorm_avg} snip={snip_avg} "
         f"jacobian={jacobian_avg} fisher={fisher_avg}"
     )
+    print("\n")
     print(line)
     if args.encoder_only:
         out_file = join(args.out_dir, f"{dataset_name}_metrics_encoder_only_b{args.batches}.csv")
@@ -239,6 +240,8 @@ def main():
                     f"{row['dataset']},{row['cfg']},{row['batch']},"
                     f"{row['jacobian']},{row['img_ids']},{row['seed']}\n"
                 )
+    print("Done!")
+    print("--------------------------------------------------\n\n")
 
 
 if __name__ == "__main__":
