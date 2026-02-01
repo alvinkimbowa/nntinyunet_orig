@@ -131,7 +131,7 @@ def main():
     args = parser.parse_args()
 
     set_seed(args.seed)
-    device = torch.device("cpu" if args.gpu < 0 else f"cuda:{args.gpu}")
+    device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics.split(",") if m.strip()}
 
     model, dataset_name, batch_size, patch_size, loss_fn = load_nnunet_model(
