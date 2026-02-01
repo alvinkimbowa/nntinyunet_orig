@@ -50,16 +50,18 @@ def get_num_input_channels(dataset_name):
 
 
 def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
+    fold = fold if fold == "all" else int(fold)
     dataset_name = get_dataset_name(train_dataset_id)
     nnunet_trainer = get_trainer_from_args(dataset_name, cfg, fold, trainer, plans, device=device)
+    nnunet_trainer.enable_deep_supervision = False
     nnunet_trainer.initialize()
     model = nnunet_trainer.network.to(device)
     with open("model.txt", "w") as f:
         f.write(str(model))
-    batch_size = nnunet_trainer.batch_size
-    patch_size = nnunet_trainer.configuration_manager.patch_size
     loss_fn = nnunet_trainer.loss
-    return model, dataset_name, batch_size, patch_size, loss_fn
+    os.environ["nnUNet_n_proc_DA"] = "0"    # Use a single process for data augmentation to avoid wierd errors
+    data_loader, val_loader = nnunet_trainer.get_dataloaders()
+    return model, dataset_name, loss_fn, data_loader
 
 
 class EncoderOnly(nn.Module):
@@ -89,20 +91,6 @@ class ResizeTransform:
         img = img.permute(1, 2, 0).numpy()
         msk = msk.permute(1, 2, 0).numpy()
         return {"image": img, "mask": msk}
-
-
-def load_nnunet_loader(dataset_name, input_channels, split, batch_size, fold, split_type, patch_size):
-    dataset = nnUNetDataset(
-        dataset_name=dataset_name,
-        input_channels=input_channels,
-        split=split,
-        fold=fold,
-        split_type=split_type,
-        transform=ResizeTransform(patch_size),
-        eval=False,
-    )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
-
 
 def main():
     parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
@@ -134,7 +122,7 @@ def main():
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics.split(",") if m.strip()}
 
-    model, dataset_name, batch_size, patch_size, loss_fn = load_nnunet_model(
+    model, dataset_name, loss_fn, data_loader = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
@@ -144,16 +132,6 @@ def main():
     )
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
-    in_channels = get_num_input_channels(dataset_name)
-    loader = load_nnunet_loader(
-        dataset_name,
-        in_channels,
-        args.split,
-        batch_size // 2 if batch_size > 1 else 1,
-        args.fold,
-        args.split_type,
-        patch_size,
-    )
 
     naswot_scores = []
     synflow_scores = []
@@ -163,9 +141,12 @@ def main():
     fisher_scores = []
     breakdown_done = False
     batch_rows = []
-    for i, (imgs, targets, meta) in tqdm(enumerate(loader), total=args.batches):
+    for i, batch in tqdm(enumerate(data_loader), total=args.batches):
         if i >= args.batches:
             break
+        imgs = batch['data']
+        targets = batch['target']
+        meta = batch['keys']
         x = imgs.float().to(device)
         targets = targets.to(device)
         if "naswot" in metric_set:
