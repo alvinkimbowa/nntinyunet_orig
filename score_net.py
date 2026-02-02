@@ -62,9 +62,11 @@ def build_arg_parser():
                         help="SAM masking probability alpha for NCD metrics")
     parser.add_argument(
         "--metrics",
-        type=str,
-        default="naswot",
-        help="comma-separated list of metrics to compute",
+        nargs="+",
+        default=["naswot"],
+        help=(
+            "list of metrics to compute"
+        ),
         choices=[
             "naswot",
             "swap",
@@ -162,7 +164,7 @@ class EncoderOnly(nn.Module):
 def main(args):
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
-    metric_set = {m.strip().lower() for m in args.metrics.split(",") if m.strip()}
+    metric_set = {m.strip().lower() for m in args.metrics if m.strip()}
 
     model, dataset_name, loss_fn, data_loader = load_nnunet_model(
         args.train_dataset_id,
