@@ -309,6 +309,7 @@ if [ $score_net -eq 1 ]; then
     score_out_dir="results/nas_metrics"
     seed=1
     mkdir -p "${score_out_dir}"
+    metrics="swap,naswot,ncd_swap,ncd_naswot"
 
     python score_net.py \
         --train_dataset_id $train_dataset_id \
@@ -321,5 +322,6 @@ if [ $score_net -eq 1 ]; then
         --split_type $score_split_type \
         --batches $score_batches \
         --out_dir $score_out_dir \
+        --metrics $metrics \
         --seed $seed
 fi
