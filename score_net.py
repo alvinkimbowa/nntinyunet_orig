@@ -158,21 +158,6 @@ class EncoderOnly(nn.Module):
             return out[-1]
         return out
 
-class ResizeTransform:
-    def __init__(self, patch_size):
-        self.patch_size = tuple(int(v) for v in patch_size)
-        self._img_resize = Resize(self.patch_size, antialias=True)
-        self._mask_resize = Resize(self.patch_size, interpolation=InterpolationMode.NEAREST)
-
-    def __call__(self, image, mask):
-        img = torch.as_tensor(image).permute(2, 0, 1).float()
-        msk = torch.as_tensor(mask).permute(2, 0, 1).float()
-        img = self._img_resize(img)
-        msk = self._mask_resize(msk)
-        img = img.permute(1, 2, 0).numpy()
-        msk = msk.permute(1, 2, 0).numpy()
-        return {"image": img, "mask": msk}
-
 
 def main(args):
     set_seed(args.seed)
