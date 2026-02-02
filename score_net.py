@@ -16,6 +16,7 @@ from at_init_metrics import (
     naswot_score,
     naswot_module_contributions,
     aggregate_naswot_contributions,
+    save_activation_distributions,
     synflow_score,
     gradnorm_score,
     snip_score,
@@ -107,6 +108,12 @@ def main():
     parser.add_argument("--out_dir", type=str, default="results/naswot")
     parser.add_argument("--naswot_breakdown", action="store_true",
                         help="save per-module and aggregated NASWOT contributions")
+    parser.add_argument("--debug_activations", action="store_true",
+                        help="save per-module input/activation histograms for ReLU/LeakyReLU")
+    parser.add_argument("--debug_bins", type=int, default=100,
+                        help="histogram bins for activation debug plots")
+    parser.add_argument("--debug_max_samples", type=int, default=200000,
+                        help="max samples per histogram to avoid huge plots")
     parser.add_argument("--save_batch_jacobian", action="store_true",
                         help="save per-batch jacobian with image ids")
     parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
@@ -140,6 +147,7 @@ def main():
     jacobian_scores = []
     fisher_scores = []
     breakdown_done = False
+    debug_done = False
     batch_rows = []
     for i, batch in tqdm(enumerate(data_loader), total=args.batches):
         if i >= args.batches:
@@ -152,6 +160,19 @@ def main():
         targets = targets[:batch_size//2]
         meta = meta[:batch_size//2]
         x = imgs.float().to(device)
+        if args.debug_activations and not debug_done:
+            debug_done = True
+            debug_dir = join(
+                args.out_dir,
+                f"{dataset_name}_{args.cfg}_b{args.batches}_activation_debug",
+            )
+            save_activation_distributions(
+                model,
+                x,
+                debug_dir,
+                bins=args.debug_bins,
+                max_samples=args.debug_max_samples,
+            )
         if "naswot" in metric_set:
             naswot_scores.append(naswot_score(model, x))
             if args.naswot_breakdown and not breakdown_done:

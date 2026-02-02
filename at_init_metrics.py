@@ -1,6 +1,9 @@
+import os
 import numpy as np
 import torch
 import re
+
+import matplotlib.pyplot as plt
 
 
 def _get_output_tensor(y):
@@ -140,6 +143,102 @@ def naswot_module_contributions(model, x):
         scores.append((name, float(logdet)))
     scores.sort(key=lambda t: t[1], reverse=True)
     return scores
+
+
+def save_activation_distributions(model, x, out_dir, bins=100, max_samples=200000, save_input_hist=True):
+    os.makedirs(out_dir, exist_ok=True)
+    handles = []
+    stats = {}
+
+    def _sample(arr):
+        if arr.size <= max_samples:
+            return arr
+        idx = np.random.choice(arr.size, size=max_samples, replace=False)
+        return arr[idx]
+
+    def forward_hook(module, inp, out):
+        try:
+            name = getattr(module, "_act_debug_name", None)
+            if name is None:
+                return
+            inp_t = inp[0].detach().float()
+            out_t = _get_output_tensor(out).detach().float()
+            inp_arr = inp_t.reshape(-1).cpu().numpy()
+            out_arr = out_t.reshape(-1).cpu().numpy()
+            stats[name] = (_sample(inp_arr), _sample(out_arr))
+        except Exception:
+            pass
+
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU, torch.nn.Conv2d, torch.nn.InstanceNorm2d)):
+            if getattr(module, "inplace", False):
+                module.inplace = False
+            module._act_debug_name = name
+            handles.append(module.register_forward_hook(forward_hook))
+
+    if save_input_hist:
+        x_arr = x.detach().float().reshape(-1).cpu().numpy()
+        x_arr = _sample(x_arr)
+        x_mean = float(np.mean(x_arr))
+        x_std = float(np.std(x_arr))
+        fig, ax = plt.subplots(1, 1, figsize=(4, 3))
+        ax.hist(x_arr, bins=bins, color="tab:green", alpha=0.8)
+        ax.set_title("model input")
+        ax.text(
+            0.98,
+            0.95,
+            f"mean={x_mean:.4g}\nstd={x_std:.4g}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8),
+        )
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "model_input.png"), dpi=150)
+        plt.close(fig)
+
+    with torch.no_grad():
+        _ = model(x)
+
+    for h in handles:
+        h.remove()
+
+    for name, (inp_arr, out_arr) in stats.items():
+        fig, axes = plt.subplots(1, 2, figsize=(8, 3))
+        axes[0].hist(inp_arr, bins=bins, color="tab:blue", alpha=0.8)
+        axes[0].set_title("input")
+        inp_mean = float(np.mean(inp_arr))
+        inp_std = float(np.std(inp_arr))
+        axes[0].text(
+            0.98,
+            0.95,
+            f"mean={inp_mean:.4g}\nstd={inp_std:.4g}",
+            transform=axes[0].transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8),
+        )
+        axes[1].hist(out_arr, bins=bins, color="tab:orange", alpha=0.8)
+        axes[1].set_title("activation")
+        out_mean = float(np.mean(out_arr))
+        out_std = float(np.std(out_arr))
+        axes[1].text(
+            0.98,
+            0.95,
+            f"mean={out_mean:.4g}\nstd={out_std:.4g}",
+            transform=axes[1].transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8),
+        )
+        fig.suptitle(name)
+        fig.tight_layout()
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+        fig.savefig(os.path.join(out_dir, f"{safe_name}.png"), dpi=150)
+        plt.close(fig)
 
 
 def _prefix_up_to(name: str, token: str) -> str | None:
