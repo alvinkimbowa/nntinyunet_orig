@@ -233,7 +233,7 @@ if [ $preprocess -eq 1 ]; then
 fi
 
 if [ $train -eq 1 ]; then
-    nnUNetv2_train $train_dataset_id $cfg $fold -p $plans --c -tr $trainer
+    nnUNetv2_train $train_dataset_id $cfg $fold -p $plans --c -tr $trainer --val_on_end
 fi
 
 if [ $predict -eq 1 ]; then
