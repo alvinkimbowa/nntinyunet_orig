@@ -147,6 +147,10 @@ def main():
         imgs = batch['data']
         targets = batch['target']
         meta = batch['keys']
+        batch_size = imgs.shape[0]
+        imgs = imgs[:batch_size//2]
+        targets = targets[:batch_size//2]
+        meta = meta[:batch_size//2]
         x = imgs.float().to(device)
         if "naswot" in metric_set:
             naswot_scores.append(naswot_score(model, x))
