@@ -32,6 +32,54 @@ from at_init_metrics import (
 nnUNet_raw = os.environ['nnUNet_raw']
 nnUNet_results = os.environ['nnUNet_results']
 
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
+    parser.add_argument("--train_dataset_id", type=int, required=True)
+    parser.add_argument("--use_pretrained", action="store_true", help="use pretrained model")
+    parser.add_argument("--plans", type=str, required=True)
+    parser.add_argument("--trainer", type=str, required=True)
+    parser.add_argument("--cfg", type=str, required=True)
+    parser.add_argument("--fold", type=str, default="0")
+    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
+    parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
+    parser.add_argument("--batches", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--out_dir", type=str, default="results/naswot")
+    parser.add_argument("--naswot_breakdown", action="store_true",
+                        help="save per-module and aggregated NASWOT contributions")
+    parser.add_argument("--debug_activations", action="store_true",
+                        help="save per-module input/activation histograms for ReLU/LeakyReLU")
+    parser.add_argument("--debug_bins", type=int, default=100,
+                        help="histogram bins for activation debug plots")
+    parser.add_argument("--debug_max_samples", type=int, default=200000,
+                        help="max samples per histogram to avoid huge plots")
+    parser.add_argument("--save_batch_jacobian", action="store_true",
+                        help="save per-batch jacobian with image ids")
+    parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
+    parser.add_argument("--ncd_alpha", type=float, default=0.95,
+                        help="SAM masking probability alpha for NCD metrics")
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        default="naswot",
+        help="comma-separated list of metrics to compute",
+        choices=[
+            "naswot",
+            "swap",
+            "ncd_naswot",
+            "ncd_swap",
+            "synflow",
+            "gradnorm",
+            "snip",
+            "jacobian",
+            "fisher",
+            "az_nas",
+        ],
+    )
+    return parser
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -125,53 +173,8 @@ class ResizeTransform:
         msk = msk.permute(1, 2, 0).numpy()
         return {"image": img, "mask": msk}
 
-def main():
-    parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
-    parser.add_argument("--train_dataset_id", type=int, required=True)
-    parser.add_argument("--use_pretrained", action="store_true", help="use pretrained model")
-    parser.add_argument("--plans", type=str, required=True)
-    parser.add_argument("--trainer", type=str, required=True)
-    parser.add_argument("--cfg", type=str, required=True)
-    parser.add_argument("--fold", type=str, default="0")
-    parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
-    parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
-    parser.add_argument("--batches", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--out_dir", type=str, default="results/naswot")
-    parser.add_argument("--naswot_breakdown", action="store_true",
-                        help="save per-module and aggregated NASWOT contributions")
-    parser.add_argument("--debug_activations", action="store_true",
-                        help="save per-module input/activation histograms for ReLU/LeakyReLU")
-    parser.add_argument("--debug_bins", type=int, default=100,
-                        help="histogram bins for activation debug plots")
-    parser.add_argument("--debug_max_samples", type=int, default=200000,
-                        help="max samples per histogram to avoid huge plots")
-    parser.add_argument("--save_batch_jacobian", action="store_true",
-                        help="save per-batch jacobian with image ids")
-    parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
-    parser.add_argument("--ncd_alpha", type=float, default=0.95,
-                        help="SAM masking probability alpha for NCD metrics")
-    parser.add_argument(
-        "--metrics",
-        type=str,
-        default="naswot",
-        help="comma-separated list of metrics to compute",
-        choices=[
-            "naswot",
-            "swap",
-            "ncd_naswot",
-            "ncd_swap",
-            "synflow",
-            "gradnorm",
-            "snip",
-            "jacobian",
-            "fisher",
-            "az_nas",
-        ],
-    )
-    args = parser.parse_args()
 
+def main(args):
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics.split(",") if m.strip()}
@@ -340,4 +343,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = build_arg_parser().parse_args()
+    main(args)
