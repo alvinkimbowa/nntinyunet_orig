@@ -72,7 +72,7 @@ def _install_naswot_hooks(model, batch_size, stage_only=False):
     return handles, K_accum
 
 
-def naswot_score(model, x, stage_only=True):
+def naswot_score(model, x, stage_only=False):
     model.zero_grad(set_to_none=True)
     handles, K = _install_naswot_hooks(model, x.size(0), stage_only=stage_only)
     x = x.clone().requires_grad_(True)
