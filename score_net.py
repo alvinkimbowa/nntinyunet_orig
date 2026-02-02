@@ -10,6 +10,7 @@ from torchvision.transforms import Resize, InterpolationMode
 from tqdm import tqdm
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
+from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
 from dataset import nnUNetDataset
 from at_init_metrics import (
@@ -68,6 +69,33 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
     data_loader, val_loader = nnunet_trainer.get_dataloaders()
     return model, dataset_name, loss_fn, data_loader
 
+def load_pretrained_model(train_dataset_id, plans, trainer, cfg, fold, device):
+    fold = fold if fold == "all" else int(fold)
+    dataset_name = get_dataset_name(train_dataset_id)
+    model_dir = join(
+        nnUNet_results,
+        dataset_name,
+        f"{trainer}__{plans}__{cfg}",
+    )
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=True,
+        perform_everything_on_device=True,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=True
+    )
+    # initializes the network architecture, loads the checkpoint
+    predictor.initialize_from_trained_model_folder(
+        model_dir,
+        use_folds=(fold,),
+        checkpoint_name="checkpoint_final.pth",
+    )
+
+    return predictor.network.to(device)
+
 
 class EncoderOnly(nn.Module):
     def __init__(self, model):
@@ -100,6 +128,7 @@ class ResizeTransform:
 def main():
     parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
     parser.add_argument("--train_dataset_id", type=int, required=True)
+    parser.add_argument("--use_pretrained", action="store_true", help="use pretrained model")
     parser.add_argument("--plans", type=str, required=True)
     parser.add_argument("--trainer", type=str, required=True)
     parser.add_argument("--cfg", type=str, required=True)
@@ -155,6 +184,15 @@ def main():
         args.fold,
         device,
     )
+    if args.use_pretrained:
+        model = load_pretrained_model(
+            args.train_dataset_id,
+            args.plans,
+            args.trainer,
+            args.cfg,
+            args.fold,
+            device,
+        )
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
 
