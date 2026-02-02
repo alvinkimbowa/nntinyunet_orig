@@ -325,3 +325,20 @@ if [ $score_net -eq 1 ]; then
         --metrics $metrics \
         --seed $seed
 fi
+
+
+if [[ $metrics == *"jacobian"* ]]; then
+    python analyze_batch_jacobian.py \
+        --train_dataset_id $train_dataset_id \
+        --batches $score_batches
+
+    python embed_batch_images.py \
+        --train_dataset_id $train_dataset_id \
+        --nas_dir results/nas_metrics \
+        --batches $score_batches \
+        --top_k 5 \
+        --bottom_k 5 \
+        --neutral_k 5 \
+        --method umap \
+        --plot_both
+fi
