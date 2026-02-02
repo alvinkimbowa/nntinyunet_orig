@@ -13,10 +13,14 @@ from nnunetv2.run.run_training import get_trainer_from_args
 
 from dataset import nnUNetDataset
 from at_init_metrics import (
+    swap_score,
+    ncd_swap_score,
+    ncd_naswot_score,
     naswot_score,
     naswot_module_contributions,
     aggregate_naswot_contributions,
     save_activation_distributions,
+    az_nas_score,
     synflow_score,
     gradnorm_score,
     snip_score,
@@ -117,11 +121,25 @@ def main():
     parser.add_argument("--save_batch_jacobian", action="store_true",
                         help="save per-batch jacobian with image ids")
     parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
+    parser.add_argument("--ncd_alpha", type=float, default=0.95,
+                        help="SAM masking probability alpha for NCD metrics")
     parser.add_argument(
         "--metrics",
         type=str,
-        default="naswot,synflow,gradnorm,snip,jacobian,fisher",
+        default="naswot",
         help="comma-separated list of metrics to compute",
+        choices=[
+            "naswot",
+            "swap",
+            "ncd_naswot",
+            "ncd_swap",
+            "synflow",
+            "gradnorm",
+            "snip",
+            "jacobian",
+            "fisher",
+            "az_nas",
+        ],
     )
     args = parser.parse_args()
 
@@ -140,7 +158,11 @@ def main():
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
 
+    swap_scores = []
     naswot_scores = []
+    ncd_naswot_scores = []
+    ncd_swap_scores = []
+    az_nas_scores = []
     synflow_scores = []
     gradnorm_scores = []
     snip_scores = []
@@ -155,10 +177,6 @@ def main():
         imgs = batch['data']
         targets = batch['target']
         meta = batch['keys']
-        batch_size = imgs.shape[0]
-        imgs = imgs[:batch_size//2]
-        targets = targets[:batch_size//2]
-        meta = meta[:batch_size//2]
         x = imgs.float().to(device)
         if args.debug_activations and not debug_done:
             debug_done = True
@@ -173,6 +191,12 @@ def main():
                 bins=args.debug_bins,
                 max_samples=args.debug_max_samples,
             )
+        if "swap" in metric_set:
+            swap_scores.append(swap_score(model, x))
+        if "ncd_swap" in metric_set:
+            ncd_swap_scores.append(ncd_swap_score(model, x, alpha=args.ncd_alpha))
+        if "ncd_naswot" in metric_set:
+            ncd_naswot_scores.append(ncd_naswot_score(model, x, alpha=args.ncd_alpha))
         if "naswot" in metric_set:
             naswot_scores.append(naswot_score(model, x))
             if args.naswot_breakdown and not breakdown_done:
@@ -180,6 +204,8 @@ def main():
                 module_scores = naswot_module_contributions(model, x)
                 stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
                 block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
+        if "az_nas" in metric_set:
+            az_nas_scores.append(az_nas_score(model, x, offload_to_cpu=True))
         if "synflow" in metric_set:
             synflow_scores.append(
                 synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
@@ -207,7 +233,11 @@ def main():
                         "seed": args.seed,
                     }
                 )
+    swap_avg = float(np.nanmean(swap_scores)) if swap_scores else float("nan")
     naswot_avg = float(np.nanmean(naswot_scores)) if naswot_scores else float("nan")
+    ncd_naswot_avg = float(np.nanmean(ncd_naswot_scores)) if ncd_naswot_scores else float("nan")
+    ncd_swap_avg = float(np.nanmean(ncd_swap_scores)) if ncd_swap_scores else float("nan")
+    az_nas_avg = float(np.nanmean(az_nas_scores)) if az_nas_scores else float("nan")
     synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
     gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")
     snip_avg = float(np.nanmean(snip_scores)) if snip_scores else float("nan")
@@ -215,7 +245,9 @@ def main():
     fisher_avg = float(np.nanmean(fisher_scores)) if fisher_scores else float("nan")
     params = sum(p.numel() for p in model.parameters())
     line = (
-        f"params={params} naswot={naswot_avg} synflow={synflow_avg} "
+        f"params={params} swap={swap_avg} naswot={naswot_avg} "
+        f"ncd_naswot={ncd_naswot_avg} ncd_swap={ncd_swap_avg} "
+        f"az_nas={az_nas_avg} synflow={synflow_avg} "
         f"gradnorm={gradnorm_avg} snip={snip_avg} "
         f"jacobian={jacobian_avg} fisher={fisher_avg}"
     )
@@ -229,9 +261,10 @@ def main():
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
         if need_header:
-            f.write("cfg,params,naswot,synflow,gradnorm,snip,jacobian,fisher\n")
+            f.write("cfg,params,swap,naswot,ncd_naswot,ncd_swap,az_nas,synflow,gradnorm,snip,jacobian,fisher\n")
         f.write(
-            f"{args.cfg},{params},{naswot_avg},{synflow_avg},"
+            f"{args.cfg},{params},{swap_avg},{naswot_avg},{ncd_naswot_avg},"
+            f"{ncd_swap_avg},{az_nas_avg},{synflow_avg},"
             f"{gradnorm_avg},{snip_avg},{jacobian_avg},{fisher_avg}\n"
         )
     
