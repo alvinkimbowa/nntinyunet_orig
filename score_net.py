@@ -4,6 +4,7 @@ import os
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import Resize, InterpolationMode
@@ -11,6 +12,7 @@ from tqdm import tqdm
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from nnunetv2.utilities.utils import create_lists_from_splitted_dataset_folder
 
 from dataset import nnUNetDataset
 from at_init_metrics import (
@@ -147,6 +149,53 @@ def load_pretrained_model(train_dataset_id, plans, trainer, cfg, fold, device):
     return predictor.network.to(device)
 
 
+def center_crop_or_pad(x: torch.Tensor, patch_size: tuple[int, int], pad_value: float = 0):
+    """
+    x: (N, C, H, W) or (C, H, W) or (H, W)
+    patch_size: (H, W)
+    returns: torch.Tensor
+    """
+    if x.ndim == 4:   # N, C, H, W
+        h, w = x.shape[2:]
+    elif x.ndim == 3: # C, H, W
+        h, w = x.shape[1:]
+    elif x.ndim == 2: # H, W
+        h, w = x.shape
+    else:
+        raise ValueError(f"Unsupported shape: {x.shape}")
+
+    # pad (center)
+    pad_h = max(patch_size[0] - h, 0)
+    pad_w = max(patch_size[1] - w, 0)
+
+    # split padding: extra goes to the right/bottom
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+
+    if pad_h > 0 or pad_w > 0:
+        # F.pad uses (left, right, top, bottom) for 2D spatial
+        x = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=pad_value)
+
+    # crop (center)
+    if x.ndim == 4:
+        h, w = x.shape[2:]
+        hs = (h - patch_size[0]) // 2
+        ws = (w - patch_size[1]) // 2
+        return x[:, :, hs:hs+patch_size[0], ws:ws+patch_size[1]]
+    elif x.ndim == 3:
+        h, w = x.shape[1:]
+        hs = (h - patch_size[0]) // 2
+        ws = (w - patch_size[1]) // 2
+        return x[:, hs:hs+patch_size[0], ws:ws+patch_size[1]]
+    else:
+        h, w = x.shape
+        hs = (h - patch_size[0]) // 2
+        ws = (w - patch_size[1]) // 2
+        return x[hs:hs+patch_size[0], ws:ws+patch_size[1]]
+
+
 class EncoderOnly(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -166,13 +215,14 @@ def main(args):
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics if m.strip()}
 
-    model, dataset_name, loss_fn, data_loader = load_nnunet_model(
+    model, dataset_name, loss_fn, data_loader, num_train, batch_size, patch_size = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
         args.cfg,
         args.fold,
         device,
+        num_cases=args.batches,
     )
     if args.use_pretrained:
         model = load_pretrained_model(
