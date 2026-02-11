@@ -389,9 +389,6 @@ def _install_naswot_hooks(model, batch_size, stage_only=False, save_codes=False)
     def forward_hook(module, inp, out):
         try:
             x = _get_output_tensor(out)
-            if not getattr(module, "visited_backwards", False):
-                return
-            x = inp[0]
             x = x.view(x.size(0), -1)
             x = (x > 0).float()
             K = x @ x.t()
