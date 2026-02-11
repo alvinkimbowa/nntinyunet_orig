@@ -305,11 +305,12 @@ fi
 if [ $score_net -eq 1 ]; then
     score_split="Tr"
     score_split_type="train"
-    score_batches=1
+    batch_size=-1
     score_out_dir="results/nas_metrics"
     seed=1
     mkdir -p "${score_out_dir}"
-    metrics="swap,naswot,ncd_swap,ncd_naswot"
+    # metrics=("ncd_swap jacobian ncd_naswot") #swap,naswot,ncd_swap,ncd_naswot"
+    metrics=("jacobian") # swap naswot ncd_swap ncd_naswot") #az_nas")
 
     python score_net.py \
         --train_dataset_id $train_dataset_id \
@@ -318,27 +319,34 @@ if [ $score_net -eq 1 ]; then
         --cfg $cfg \
         --fold $fold \
         --gpu $gpu_id \
+        --chk $chk \
         --split $score_split \
         --split_type $score_split_type \
-        --batches $score_batches \
+        --batch_size $batch_size \
         --out_dir $score_out_dir \
         --metrics $metrics \
-        --seed $seed
+        --seed $seed \
+        --save_naswot_codes \
+        --save_swap_codes \
+        --save_ncd_naswot_codes \
+        --save_ncd_swap_codes \
+        --save_batch_jacobian
+
 fi
 
 
 if [[ $metrics == *"jacobian"* ]]; then
     python analyze_batch_jacobian.py \
         --train_dataset_id $train_dataset_id \
-        --batches $score_batches
+        --batches $batch_size
 
     python embed_batch_images.py \
         --train_dataset_id $train_dataset_id \
         --nas_dir results/nas_metrics \
-        --batches $score_batches \
-        --top_k 5 \
-        --bottom_k 5 \
-        --neutral_k 5 \
+        --batches $batch_size \
+        --top_k 100 \
+        --bottom_k 100 \
+        --neutral_k 100 \
         --method umap \
         --plot_both
 fi
