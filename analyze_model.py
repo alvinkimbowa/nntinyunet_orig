@@ -152,7 +152,7 @@ def analyze_model(model, dataset_name, input_size, in_channels, model_dir, gpu, 
 def main():
     args = parse_args()
     
-    device = torch.device('cpu' if args.gpu < 0 else f'cuda:{args.gpu}')
+    device = torch.device('cpu' if args.gpu < 0 else 'cuda')
     model, dataset_name, in_channels, patch_size = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
