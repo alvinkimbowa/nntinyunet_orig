@@ -611,7 +611,7 @@ def snip_score(model, x):
     return float(score)
 
 
-def jacobian_score(model, x, y=None, loss_fn=None):
+def jacobian_score(model, x, targets=None, loss_fn=None):
     model.zero_grad(set_to_none=True)
     x = x.clone().requires_grad_(True)
     y = model(x)
@@ -619,7 +619,7 @@ def jacobian_score(model, x, y=None, loss_fn=None):
     loss = y.float().sum()
     # loss = y.float().mean()
     # loss = (y ** 2).mean()
-    # loss = loss_fn(y, y)
+    # loss = loss_fn(y, targets)
     grad = torch.autograd.grad(loss, x, retain_graph=False, create_graph=False)[0]
     return float(grad.norm().item())
 
