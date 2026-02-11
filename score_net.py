@@ -293,6 +293,11 @@ def main(args):
     
     if args.batch_size == -1:
         args.batch_size = "all"
+    
+    print("num_train", num_train)
+    print("batch_size", args.batch_size)
+    print("mini_batch_size", mini_batch_size)
+    print("patch_size", patch_size)
 
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
