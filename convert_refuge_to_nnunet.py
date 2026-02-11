@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
@@ -73,16 +72,19 @@ def main() -> None:
         help="Output nnUNet dataset directory.",
     )
     parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=0.1,
-        help="Validation ratio from remaining (train pool).",
+        "--train-split-dir",
+        default="Training-400",
+        help="Folder name under --src used as training split.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for split.",
+        "--val-split-dir",
+        default="Validation-400",
+        help="Folder name under --src used as validation split.",
+    )
+    parser.add_argument(
+        "--test-split-dir",
+        default="Test-400",
+        help="Folder name under --src used as test split.",
     )
     parser.add_argument(
         "--workers",
@@ -91,9 +93,6 @@ def main() -> None:
         help="Number of worker processes (0 = cpu_count()-1).",
     )
     args = parser.parse_args()
-
-    if not 0.0 < args.val_ratio < 1.0:
-        raise ValueError("--val-ratio must be in (0, 1)")
 
     src_root = Path(args.src)
     out_root = Path(args.out)
@@ -104,27 +103,23 @@ def main() -> None:
     for d in (images_tr, labels_tr, images_ts, labels_ts):
         d.mkdir(parents=True, exist_ok=True)
 
-    rem1 = src_root / "Remaining" / "第一批Remaining"
-    rem2 = src_root / "Remaining" / "第二批Remaining"
-    test400 = src_root / "Test-400"
+    train_dir = src_root / args.train_split_dir
+    val_dir = src_root / args.val_split_dir
+    test_dir = src_root / args.test_split_dir
 
-    remain_cases = _collect_cases(rem1) + _collect_cases(rem2)
-    test_cases = _collect_cases(test400)
-    if not remain_cases:
-        raise RuntimeError("No cases found in REFUGE Remaining folders")
+    train_cases = _collect_cases(train_dir)
+    val_cases = _collect_cases(val_dir)
+    test_cases = _collect_cases(test_dir)
+    if not train_cases:
+        raise RuntimeError(f"No cases found in REFUGE train folder: {train_dir}")
+    if not val_cases:
+        raise RuntimeError(f"No cases found in REFUGE val folder: {val_dir}")
     if not test_cases:
-        raise RuntimeError("No cases found in REFUGE Test-400 folder")
-
-    rng = random.Random(args.seed)
-    idxs = list(range(len(remain_cases)))
-    rng.shuffle(idxs)
-    n_val = max(1, int(len(idxs) * args.val_ratio))
-    val_idx = set(idxs[:n_val])
+        raise RuntimeError(f"No cases found in REFUGE test folder: {test_dir}")
 
     tasks: list[tuple[Path, Path, Path, Path, Path, Path, Path, str]] = []
-    for i, (img_path, disc_path, cup_path, cid) in enumerate(remain_cases):
+    for img_path, disc_path, cup_path, cid in train_cases:
         case_id = f"REFUGE_{cid}"
-        split = "val" if i in val_idx else "train"
         tasks.append(
             (
                 img_path,
@@ -134,7 +129,22 @@ def main() -> None:
                 images_tr / f"{case_id}_0001.png",
                 images_tr / f"{case_id}_0002.png",
                 labels_tr / f"{case_id}.png",
-                split,
+                "train",
+            )
+        )
+
+    for img_path, disc_path, cup_path, cid in val_cases:
+        case_id = f"REFUGE_{cid}"
+        tasks.append(
+            (
+                img_path,
+                disc_path,
+                cup_path,
+                images_tr / f"{case_id}_0000.png",
+                images_tr / f"{case_id}_0001.png",
+                images_tr / f"{case_id}_0002.png",
+                labels_tr / f"{case_id}.png",
+                "val",
             )
         )
 
