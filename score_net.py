@@ -6,15 +6,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision.transforms import Resize, InterpolationMode
 from tqdm import tqdm
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from nnunetv2.utilities.utils import create_lists_from_splitted_dataset_folder
 
-from dataset import nnUNetDataset
 from at_init_metrics import (
     swap_score,
     ncd_swap_score,
