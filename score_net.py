@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -36,7 +37,7 @@ from at_init_metrics import (
 
 nnUNet_raw = os.environ['nnUNet_raw']
 nnUNet_results = os.environ['nnUNet_results']
-
+nnUNet_preprocessed = os.environ['nnUNet_preprocessed']
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
@@ -159,12 +160,20 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretr
         verbose_preprocessing=False,
         allow_tqdm=True
     )
-    
+        
+    if not os.path.exists(join(model_dir, f"fold_{fold}", "checkpoint_final.pth")):
+        nnunet_trainer.save_checkpoint(join(model_dir, f"fold_{fold}", "checkpoint_final.pth"))
+    if not os.path.exists(join(model_dir, "dataset.json")):
+        shutil.copy(join(nnUNet_preprocessed, dataset_name, "dataset.json"), join(model_dir, "dataset.json"))
+    if not os.path.exists(join(model_dir, "plans.json")):
+        shutil.copy(join(nnUNet_preprocessed, dataset_name, f"{plans}.json"), join(model_dir, "plans.json"))
+
     predictor.initialize_from_trained_model_folder(
         model_dir,
         use_folds=(fold,),
         checkpoint_name=chk,
     )
+
     if pretrained:
         model = predictor.network.to(device)
     
