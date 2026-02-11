@@ -35,6 +35,7 @@ nnUNet_results = os.environ['nnUNet_results']
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Compute NASWOT score for an nnUNet model")
     parser.add_argument("--train_dataset_id", type=int, required=True)
+    parser.add_argument("--chk", type=str, default="checkpoint_final.pth")
     parser.add_argument("--use_pretrained", action="store_true", help="use pretrained model")
     parser.add_argument("--plans", type=str, required=True)
     parser.add_argument("--trainer", type=str, required=True)
@@ -43,7 +44,7 @@ def build_arg_parser():
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
-    parser.add_argument("--batches", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=None, help="batch size for scoring")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out_dir", type=str, default="results/naswot")
     parser.add_argument("--naswot_breakdown", action="store_true",
@@ -98,15 +99,23 @@ def get_dataset_name(dataset_id):
     return dataset_name[0]
 
 
+def get_dataset_json(dataset_id):
+    dataset_name = get_dataset_name(dataset_id)
+    with open(join(nnUNet_raw, dataset_name, "dataset.json"), "r") as f:
+        dataset_json = json.load(f)
+    return dataset_json
+
 def get_num_input_channels(dataset_name):
     with open(join(nnUNet_raw, dataset_name, "dataset.json"), "r") as f:
         dataset_json = json.load(f)
     return len(dataset_json["channel_names"])
 
 
-def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
+def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretrained=False, num_cases=None, chk="checkpoint_final.pth"):
     fold = fold if fold == "all" else int(fold)
     dataset_name = get_dataset_name(train_dataset_id)
+    dataset_json = get_dataset_json(train_dataset_id)
+    
     nnunet_trainer = get_trainer_from_args(dataset_name, cfg, fold, trainer, plans, device=device)
     nnunet_trainer.enable_deep_supervision = False
     nnunet_trainer.initialize()
@@ -115,8 +124,50 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device):
         f.write(str(model))
     loss_fn = nnunet_trainer.loss
     os.environ["nnUNet_n_proc_DA"] = "0"    # Use a single process for data augmentation to avoid wierd errors
-    data_loader, val_loader = nnunet_trainer.get_dataloaders()
-    return model, dataset_name, loss_fn, data_loader
+    # data_loader, val_loader = nnunet_trainer.get_dataloaders()
+    num_train = get_dataset_json(train_dataset_id)["numTraining"]
+    mini_batch_size = nnunet_trainer.configuration_manager.batch_size
+    patch_size = nnunet_trainer.configuration_manager.patch_size
+    model_dir = join(
+        nnUNet_results,
+        dataset_name,
+        f"{trainer}__{plans}__{cfg}",
+    )
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=True,
+        perform_everything_on_device=True,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=True
+    )
+    
+    predictor.initialize_from_trained_model_folder(
+        model_dir,
+        use_folds=(fold,),
+        checkpoint_name=chk,
+    )
+    if pretrained:
+        model = predictor.network.to(device)
+    
+    all_cases = create_lists_from_splitted_dataset_folder(
+        join(nnUNet_raw, dataset_name, "imagesTr"),
+        dataset_json["file_ending"],
+    )
+    random.shuffle(all_cases)
+    if num_cases is None or num_cases == -1:
+        sample_cases = all_cases
+    else:
+        sample_cases = all_cases[:num_cases] 
+    data_loader = predictor.get_data_iterator(sample_cases,
+                                        "/home/ultrai/UltrAi/nntinyunet",
+                                        save_probabilities=False, overwrite=True,
+                                        num_processes_preprocessing=2, num_processes_segmentation_export=2,
+                                        folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
+    
+    return model, dataset_name, loss_fn, data_loader, num_train, mini_batch_size, patch_size
 
 def load_pretrained_model(train_dataset_id, plans, trainer, cfg, fold, device):
     fold = fold if fold == "all" else int(fold)
@@ -212,24 +263,21 @@ def main(args):
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics if m.strip()}
 
-    model, dataset_name, loss_fn, data_loader, num_train, batch_size, patch_size = load_nnunet_model(
+    model, dataset_name, loss_fn, data_loader, num_train, mini_batch_size, patch_size = load_nnunet_model(
         args.train_dataset_id,
         args.plans,
         args.trainer,
         args.cfg,
         args.fold,
         device,
-        num_cases=args.batches,
+        pretrained=args.use_pretrained,
+        num_cases=args.batch_size,
+        chk=args.chk,
     )
-    if args.use_pretrained:
-        model = load_pretrained_model(
-            args.train_dataset_id,
-            args.plans,
-            args.trainer,
-            args.cfg,
-            args.fold,
-            device,
-        )
+    
+    if args.batch_size == -1:
+        args.batch_size = "all"
+
     if args.encoder_only:
         model = EncoderOnly(model).to(device)
 
@@ -246,18 +294,18 @@ def main(args):
     breakdown_done = False
     debug_done = False
     batch_rows = []
-    for i, batch in tqdm(enumerate(data_loader), total=args.batches):
-        if i >= args.batches:
-            break
+    for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
         imgs = batch['data']
-        targets = batch['target']
-        meta = batch['keys']
+        imgs = imgs.permute(1, 0, 2, 3)
+        imgs = center_crop_or_pad(imgs, patch_size)
+        meta = batch['ofile']
+
         x = imgs.float().to(device)
         if args.debug_activations and not debug_done:
             debug_done = True
             debug_dir = join(
                 args.out_dir,
-                f"{dataset_name}_{args.cfg}_b{args.batches}_activation_debug",
+                f"{dataset_name}_{args.cfg}_b{args.batch_size}_activation_debug",
             )
             save_activation_distributions(
                 model,
@@ -292,10 +340,10 @@ def main(args):
         if "fisher" in metric_set:
             fisher_scores.append(fisher_score(model, x))
         if "jacobian" in metric_set:
-            jac = jacobian_score(model, x, targets, loss_fn)
+            jac = jacobian_score(model, x, loss_fn=loss_fn)
             jacobian_scores.append(jac)
             if args.save_batch_jacobian:
-                img_ids = meta["img_id"] if isinstance(meta, dict) else meta.get("img_id")
+                img_ids = os.path.basename(meta)
                 if isinstance(img_ids, (list, tuple)):
                     img_ids = ";".join(img_ids)
                 batch_rows.append(
@@ -329,9 +377,11 @@ def main(args):
     print("\n")
     print(line)
     if args.encoder_only:
-        out_file = join(args.out_dir, f"{dataset_name}_metrics_encoder_only_b{args.batches}.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_metrics_encoder_only_b{args.batch_size}.csv")
     else:
-        out_file = join(args.out_dir, f"{dataset_name}_metrics_b{args.batches}.csv")
+        out_file = join(args.out_dir, f"{dataset_name}_metrics_b{args.batch_size}.csv")
+    if args.use_pretrained:
+        out_file = out_file.replace("metrics_", "metrics_pretrained_")
     print("out_file", out_file)
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
@@ -344,7 +394,7 @@ def main(args):
         )
     
     if args.naswot_breakdown and breakdown_done:
-        suffix = f"{dataset_name}_{args.cfg}_b{args.batches}"
+        suffix = f"{dataset_name}_{args.cfg}_b{args.batch_size}"
         mod_path = join(args.out_dir, f"{suffix}_naswot_modules.csv")
         stage_path = join(args.out_dir, f"{suffix}_naswot_stages.csv")
         block_path = join(args.out_dir, f"{suffix}_naswot_blocks.csv")
@@ -362,7 +412,7 @@ def main(args):
                 f.write(f"{name},{val}\n")
 
     if args.save_batch_jacobian and batch_rows:
-        batch_path = join(args.out_dir, f"{dataset_name}_batch_jacobian_b{args.batches}.csv")
+        batch_path = join(args.out_dir, f"{dataset_name}_batch_jacobian_b{args.batch_size}.csv")
         need_header = not os.path.exists(batch_path) or os.path.getsize(batch_path) == 0
         with open(batch_path, "a", encoding="utf-8") as f:
             if need_header:
