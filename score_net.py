@@ -481,7 +481,12 @@ def main(args):
     synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
     gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")
     snip_avg = float(np.nanmean(snip_scores)) if snip_scores else float("nan")
-    jacobian_avg = float(np.nanmean(jacobian_scores)) if jacobian_scores else float("nan")
+    if jacobian_scores:
+        jac_arr = np.asarray(jacobian_scores, dtype=np.float64)
+        jac_arr = jac_arr[np.isfinite(jac_arr)]
+        jacobian_avg = float(np.sqrt(np.sum(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
+    else:
+        jacobian_avg = float("nan")
     fisher_avg = float(np.nanmean(fisher_scores)) if fisher_scores else float("nan")
     params = sum(p.numel() for p in model.parameters())
     line = (
