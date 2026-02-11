@@ -16,7 +16,13 @@ from at_init_metrics import (
     swap_score,
     ncd_swap_score,
     ncd_naswot_score,
+    collect_ncd_swap_packed_codes,
+    collect_ncd_naswot_packed_codes,
     naswot_score,
+    collect_naswot_packed_codes,
+    naswot_from_packed,
+    collect_swap_packed_codes,
+    swap_from_packed,
     naswot_module_contributions,
     aggregate_naswot_contributions,
     save_activation_distributions,
@@ -60,6 +66,16 @@ def build_arg_parser():
     parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
     parser.add_argument("--ncd_alpha", type=float, default=0.95,
                         help="SAM masking probability alpha for NCD metrics")
+    parser.add_argument("--global_samples", type=int, default=0,
+                        help="if >0, compute naswot/swap on a single concatenated batch of this many samples")
+    parser.add_argument("--save_naswot_codes", action="store_true",
+                        help="save packed naswot codes across batches and compute a single global naswot")
+    parser.add_argument("--save_swap_codes", action="store_true",
+                        help="save packed swap codes across batches and compute a single global swap")
+    parser.add_argument("--save_ncd_naswot_codes", action="store_true",
+                        help="save packed NCD NASWOT codes across batches and compute a single global NCD NASWOT")
+    parser.add_argument("--save_ncd_swap_codes", action="store_true",
+                        help="save packed NCD SWAP codes across batches and compute a single global NCD SWAP")
     parser.add_argument(
         "--metrics",
         nargs="+",
@@ -294,6 +310,18 @@ def main(args):
     breakdown_done = False
     debug_done = False
     batch_rows = []
+    packed_codes = {}
+    packed_nbits = {}
+    swap_packed_codes = {}
+    swap_packed_nbits = {}
+    ncd_naswot_packed_codes = {}
+    ncd_naswot_packed_nbits = {}
+    ncd_swap_packed_codes = {}
+    ncd_swap_packed_nbits = {}
+    global_x = None
+    global_device = None
+    ncd_model = None
+
     for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
         imgs = batch['data']
         imgs = imgs.permute(1, 0, 2, 3)
@@ -315,13 +343,59 @@ def main(args):
                 max_samples=args.debug_max_samples,
             )
         if "swap" in metric_set:
-            swap_scores.append(swap_score(model, x))
+            if args.save_swap_codes:
+                swap_codes, swap_nbits = collect_swap_packed_codes(model, x)
+                for k, v in swap_codes.items():
+                    swap_packed_codes.setdefault(k, []).append(v)
+                    swap_packed_nbits[k] = swap_nbits[k]
+            elif global_x is not None:
+                model_cpu = model.to("cpu")
+                swap_scores.append(swap_score(model_cpu, global_x))
+                model = model_cpu.to(global_device)
+            else:
+                swap_scores.append(swap_score(model, x))
         if "ncd_swap" in metric_set:
-            ncd_swap_scores.append(ncd_swap_score(model, x, alpha=args.ncd_alpha))
+            if args.save_ncd_swap_codes:
+                if ncd_model is None:
+                    import copy
+                    ncd_model = copy.deepcopy(model).to(device)
+                    from at_init_metrics import swap_bn_to_ln
+                    swap_bn_to_ln(ncd_model)
+                ncd_swap_codes, ncd_swap_nbits = collect_ncd_swap_packed_codes(
+                    ncd_model, x, alpha=args.ncd_alpha
+                )
+                for k, v in ncd_swap_codes.items():
+                    ncd_swap_packed_codes.setdefault(k, []).append(v)
+                    ncd_swap_packed_nbits[k] = ncd_swap_nbits[k]
+            else:
+                ncd_swap_scores.append(ncd_swap_score(model, x, alpha=args.ncd_alpha))
         if "ncd_naswot" in metric_set:
-            ncd_naswot_scores.append(ncd_naswot_score(model, x, alpha=args.ncd_alpha))
+            if args.save_ncd_naswot_codes:
+                if ncd_model is None:
+                    import copy
+                    ncd_model = copy.deepcopy(model).to(device)
+                    from at_init_metrics import swap_bn_to_ln
+                    swap_bn_to_ln(ncd_model)
+                ncd_nas_codes, ncd_nas_nbits = collect_ncd_naswot_packed_codes(
+                    ncd_model, x, alpha=args.ncd_alpha
+                )
+                for k, v in ncd_nas_codes.items():
+                    ncd_naswot_packed_codes.setdefault(k, []).append(v)
+                    ncd_naswot_packed_nbits[k] = ncd_nas_nbits[k]
+            else:
+                ncd_naswot_scores.append(ncd_naswot_score(model, x, alpha=args.ncd_alpha))
         if "naswot" in metric_set:
-            naswot_scores.append(naswot_score(model, x))
+            if args.save_naswot_codes:
+                codes, nbits = collect_naswot_packed_codes(model, x)
+                for k, v in codes.items():
+                    packed_codes.setdefault(k, []).append(v)
+                    packed_nbits[k] = nbits[k]
+            elif global_x is not None:
+                model_cpu = model.to("cpu")
+                naswot_scores.append(naswot_score(model_cpu, global_x))
+                model = model_cpu.to(global_device)
+            else:
+                naswot_scores.append(naswot_score(model, x))
             if args.naswot_breakdown and not breakdown_done:
                 breakdown_done = True
                 module_scores = naswot_module_contributions(model, x)
@@ -356,10 +430,39 @@ def main(args):
                         "seed": args.seed,
                     }
                 )
-    swap_avg = float(np.nanmean(swap_scores)) if swap_scores else float("nan")
-    naswot_avg = float(np.nanmean(naswot_scores)) if naswot_scores else float("nan")
-    ncd_naswot_avg = float(np.nanmean(ncd_naswot_scores)) if ncd_naswot_scores else float("nan")
-    ncd_swap_avg = float(np.nanmean(ncd_swap_scores)) if ncd_swap_scores else float("nan")
+    
+    if args.save_swap_codes:
+        merged_swap_codes = {k: np.concatenate(v, axis=0) for k, v in swap_packed_codes.items()}
+        swap_codes_path = join(args.out_dir, f"{dataset_name}_{args.cfg}_b{args.batch_size}_swap_codes.npz")
+        np.savez(swap_codes_path, **{f"{k}__packed": merged_swap_codes[k] for k in merged_swap_codes},
+                 **{f"{k}__nbits": np.array(swap_packed_nbits[k]) for k in swap_packed_nbits})
+        swap_avg = swap_from_packed(merged_swap_codes, swap_packed_nbits)
+    else:
+        swap_avg = float(np.nanmean(swap_scores)) if swap_scores else float("nan")
+    if args.save_naswot_codes:
+        merged_codes = {k: np.concatenate(v, axis=0) for k, v in packed_codes.items()}
+        codes_path = join(args.out_dir, f"{dataset_name}_{args.cfg}_b{args.batch_size}_naswot_codes.npz")
+        np.savez(codes_path, **{f"{k}__packed": merged_codes[k] for k in merged_codes},
+                 **{f"{k}__nbits": np.array(packed_nbits[k]) for k in packed_nbits})
+        naswot_avg = naswot_from_packed(merged_codes, packed_nbits)
+    else:
+        naswot_avg = float(np.nanmean(naswot_scores)) if naswot_scores else float("nan")
+    if args.save_ncd_naswot_codes:
+        merged_ncd_nas = {k: np.concatenate(v, axis=0) for k, v in ncd_naswot_packed_codes.items()}
+        ncd_nas_path = join(args.out_dir, f"{dataset_name}_{args.cfg}_b{args.batch_size}_ncd_naswot_codes.npz")
+        np.savez(ncd_nas_path, **{f"{k}__packed": merged_ncd_nas[k] for k in merged_ncd_nas},
+                 **{f"{k}__nbits": np.array(ncd_naswot_packed_nbits[k]) for k in ncd_naswot_packed_nbits})
+        ncd_naswot_avg = naswot_from_packed(merged_ncd_nas, ncd_naswot_packed_nbits)
+    else:
+        ncd_naswot_avg = float(np.nanmean(ncd_naswot_scores)) if ncd_naswot_scores else float("nan")
+    if args.save_ncd_swap_codes:
+        merged_ncd_swap = {k: np.concatenate(v, axis=0) for k, v in ncd_swap_packed_codes.items()}
+        ncd_swap_path = join(args.out_dir, f"{dataset_name}_{args.cfg}_b{args.batch_size}_ncd_swap_codes.npz")
+        np.savez(ncd_swap_path, **{f"{k}__packed": merged_ncd_swap[k] for k in merged_ncd_swap},
+                 **{f"{k}__nbits": np.array(ncd_swap_packed_nbits[k]) for k in ncd_swap_packed_nbits})
+        ncd_swap_avg = swap_from_packed(merged_ncd_swap, ncd_swap_packed_nbits)
+    else:
+        ncd_swap_avg = float(np.nanmean(ncd_swap_scores)) if ncd_swap_scores else float("nan")
     az_nas_avg = float(np.nanmean(az_nas_scores)) if az_nas_scores else float("nan")
     synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
     gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")

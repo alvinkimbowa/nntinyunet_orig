@@ -27,6 +27,134 @@ def _get_stage_prefixes(model):
         return None, None
     return min(enc_idxs), max(enc_idxs)
 
+
+def _sanitize_key(name):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+
+def collect_naswot_packed_codes(model, x, stage_only=False):
+    batch_size = x.size(0)
+    codes = {}
+    nbits = {}
+
+    enc_first = enc_last = None
+    if stage_only:
+        enc_first, enc_last = _get_stage_prefixes(model)
+
+    def forward_hook(module, inp, out):
+        try:
+            name = getattr(module, "_naswot_key", None)
+            if name is None:
+                return
+            xh = _get_output_tensor(out)
+            xh = xh.view(batch_size, -1)
+            xh = (xh > 0).to(torch.uint8)
+            arr = xh.cpu().numpy()
+            packed = np.packbits(arr, axis=1)
+            key = _sanitize_key(name)
+            codes[key] = packed
+            nbits[key] = arr.shape[1]
+        except Exception:
+            pass
+
+    handles = []
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
+            if stage_only:
+                if enc_first is None:
+                    continue
+                keep = (
+                    name.startswith(f"encoder.stages.{enc_first}") or
+                    name.startswith(f"encoder.stages.{enc_last}")
+                )
+                if not keep:
+                    continue
+            if module.inplace:
+                module.inplace = False
+            module._naswot_key = name
+            handles.append(module.register_forward_hook(forward_hook))
+
+    with torch.no_grad():
+        _ = model(x)
+    for h in handles:
+        h.remove()
+
+    return codes, nbits
+
+
+def collect_swap_packed_codes(model, x):
+    batch_size = x.size(0)
+    codes = {}
+    nbits = {}
+
+    def forward_hook(module, inp, out):
+        try:
+            name = getattr(module, "_swap_key", None)
+            if name is None:
+                return
+            xh = _get_output_tensor(out)
+            xh = xh.view(batch_size, -1)
+            xh = (xh > 0).to(torch.uint8)
+            arr = xh.cpu().numpy()
+            packed = np.packbits(arr, axis=1)
+            key = _sanitize_key(name)
+            codes[key] = packed
+            nbits[key] = arr.shape[1]
+        except Exception:
+            pass
+
+    handles = []
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
+            if module.inplace:
+                module.inplace = False
+            module._swap_key = name
+            handles.append(module.register_forward_hook(forward_hook))
+
+    with torch.no_grad():
+        _ = model(x)
+    for h in handles:
+        h.remove()
+
+    return codes, nbits
+
+
+def swap_from_packed(codes_by_layer, nbits_by_layer, chunk_bits=8192):
+    seen = set()
+    for key, packed in codes_by_layer.items():
+        nbits = nbits_by_layer[key]
+        for start in range(0, nbits, chunk_bits):
+            end = min(nbits, start + chunk_bits)
+            byte_start = start // 8
+            byte_end = (end + 7) // 8
+            sub = packed[:, byte_start:byte_end]
+            bits = np.unpackbits(sub, axis=1)
+            left = start - byte_start * 8
+            right = left + (end - start)
+            bits = bits[:, left:right]
+            xt = bits.T
+            packed_cols = np.packbits(xt, axis=1)
+            for row in packed_cols:
+                seen.add(row.tobytes())
+    return float(len(seen))
+
+
+def naswot_from_packed(codes_by_layer, nbits_by_layer):
+    K_accum = None
+    for key, packed in codes_by_layer.items():
+        nbits = nbits_by_layer[key]
+        x = np.unpackbits(packed, axis=1)[:, :nbits].astype(np.float32)
+        K1 = x @ x.T
+        K2 = (1.0 - x) @ (1.0 - x.T)
+        if K_accum is None:
+            K_accum = K1 + K2
+        else:
+            K_accum += K1 + K2
+    if K_accum is None:
+        return float("nan")
+    _, logdet = np.linalg.slogdet(K_accum)
+    return float(logdet)
+
 def _install_swap_hooks(model, batch_size):
     handles = []
     # store unique neuron-wise activation patterns across the batch
@@ -139,6 +267,82 @@ def install_ncd_naswot_hooks(model, batch_size, alpha=0.0):
     return handles, score
 
 
+def collect_ncd_swap_packed_codes(model, x, alpha=0.0):
+    batch_size = x.size(0)
+    codes = {}
+    nbits = {}
+
+    def forward_hook(module, inp, _out):
+        try:
+            name = getattr(module, "_ncd_swap_key", None)
+            if name is None:
+                return
+            xh = inp[0]
+            xh = xh.view(batch_size, -1)
+            xh = apply_sam(xh, alpha)
+            xh = (xh > 0).to(torch.uint8)
+            arr = xh.cpu().numpy()
+            packed = np.packbits(arr, axis=1)
+            key = _sanitize_key(name)
+            codes[key] = packed
+            nbits[key] = arr.shape[1]
+        except Exception:
+            pass
+
+    handles = []
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
+            if module.inplace:
+                module.inplace = False
+            module._ncd_swap_key = name
+            handles.append(module.register_forward_hook(forward_hook))
+
+    with torch.no_grad():
+        _ = model(x)
+    for h in handles:
+        h.remove()
+
+    return codes, nbits
+
+
+def collect_ncd_naswot_packed_codes(model, x, alpha=0.0):
+    batch_size = x.size(0)
+    codes = {}
+    nbits = {}
+
+    def forward_hook(module, inp, _out):
+        try:
+            name = getattr(module, "_ncd_naswot_key", None)
+            if name is None:
+                return
+            xh = inp[0]
+            xh = xh.view(batch_size, -1)
+            xh = apply_sam(xh, alpha)
+            xh = (xh > 0).to(torch.uint8)
+            arr = xh.cpu().numpy()
+            packed = np.packbits(arr, axis=1)
+            key = _sanitize_key(name)
+            codes[key] = packed
+            nbits[key] = arr.shape[1]
+        except Exception:
+            pass
+
+    handles = []
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
+            if module.inplace:
+                module.inplace = False
+            module._ncd_naswot_key = name
+            handles.append(module.register_forward_hook(forward_hook))
+
+    with torch.no_grad():
+        _ = model(x)
+    for h in handles:
+        h.remove()
+
+    return codes, nbits
+
+
 def ncd_swap_score(model, x, alpha=0.95):
     import copy
     model = copy.deepcopy(model)
@@ -178,12 +382,13 @@ def swap_bn_to_ln(model):
 
 
 
-def _install_naswot_hooks(model, batch_size, stage_only=False):
+def _install_naswot_hooks(model, batch_size, stage_only=False, save_codes=False):
     handles = []
     K_accum = np.zeros((batch_size, batch_size), dtype=np.float32)
 
-    def forward_hook(module, inp, _):
+    def forward_hook(module, inp, out):
         try:
+            x = _get_output_tensor(out)
             if not getattr(module, "visited_backwards", False):
                 return
             x = inp[0]
@@ -194,9 +399,6 @@ def _install_naswot_hooks(model, batch_size, stage_only=False):
             K_accum[:] = K_accum + K.cpu().numpy() + K2.cpu().numpy()
         except Exception:
             pass
-
-    def backward_hook(module, *_):
-        module.visited_backwards = True
 
     enc_first = enc_last = None
     if stage_only:
@@ -215,12 +417,7 @@ def _install_naswot_hooks(model, batch_size, stage_only=False):
                     continue
             if module.inplace:
                 module.inplace = False
-            module.visited_backwards = False
             handles.append(module.register_forward_hook(forward_hook))
-            if hasattr(module, "register_full_backward_hook"):
-                handles.append(module.register_full_backward_hook(backward_hook))
-            else:
-                handles.append(module.register_backward_hook(backward_hook))
 
     return handles, K_accum
 
@@ -235,14 +432,9 @@ def swap_score(model, x):
 
 
 def naswot_score(model, x, stage_only=False):
-    model.zero_grad(set_to_none=True)
     handles, K = _install_naswot_hooks(model, x.size(0), stage_only=stage_only)
-    x = x.clone().requires_grad_(True)
-    y = model(x)
-    if isinstance(y, (tuple, list)):
-        y = y[0]
-    y.backward(torch.ones_like(y))
-    _ = model(x.detach())
+    with torch.no_grad():
+        _ = model(x)
     for h in handles:
         h.remove()
     _, logdet = np.linalg.slogdet(K)
@@ -250,19 +442,16 @@ def naswot_score(model, x, stage_only=False):
 
 
 def naswot_module_contributions(model, x):
-    model.zero_grad(set_to_none=True)
     batch_size = x.size(0)
     handles = []
     K_by_module = {}
 
-    def forward_hook(module, inp, _):
+    def forward_hook(module, inp, out):
         try:
-            if not getattr(module, "visited_backwards", False):
-                return
             key = getattr(module, "_naswot_key", None)
             if key is None:
                 return
-            xh = inp[0]
+            xh = _get_output_tensor(out)
             xh = xh.view(xh.size(0), -1)
             xh = (xh > 0).float()
             K = xh @ xh.t()
@@ -271,28 +460,16 @@ def naswot_module_contributions(model, x):
         except Exception:
             pass
 
-    def backward_hook(module, *_):
-        module.visited_backwards = True
-
     for name, module in model.named_modules():
         if isinstance(module, (torch.nn.ReLU, torch.nn.LeakyReLU)):
             if module.inplace:
                 module.inplace = False
-            module.visited_backwards = False
             module._naswot_key = name
             K_by_module[name] = np.zeros((batch_size, batch_size), dtype=np.float32)
             handles.append(module.register_forward_hook(forward_hook))
-            if hasattr(module, "register_full_backward_hook"):
-                handles.append(module.register_full_backward_hook(backward_hook))
-            else:
-                handles.append(module.register_backward_hook(backward_hook))
 
-    x = x.clone().requires_grad_(True)
-    y = model(x)
-    if isinstance(y, (tuple, list)):
-        y = y[0]
-    y.backward(torch.ones_like(y))
-    _ = model(x.detach())
+    with torch.no_grad():
+        _ = model(x)
     for h in handles:
         h.remove()
 
