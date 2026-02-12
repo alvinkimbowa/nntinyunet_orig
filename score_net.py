@@ -187,7 +187,7 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretr
     else:
         sample_cases = all_cases[:num_cases] 
     data_loader = predictor.get_data_iterator(sample_cases,
-                                        "/home/ultrai/UltrAi/nntinyunet/tmp",
+                                        "tmp",
                                         save_probabilities=False, overwrite=True,
                                         num_processes_preprocessing=2, num_processes_segmentation_export=2,
                                         folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
