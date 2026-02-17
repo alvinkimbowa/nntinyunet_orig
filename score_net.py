@@ -339,6 +339,12 @@ def main(args):
     for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
         imgs = batch['data']
         imgs = imgs.permute(1, 0, 2, 3)
+        if imgs.shape[0] > mini_batch_size:
+            center = imgs.shape[0] // 2
+            half = mini_batch_size // 2
+            start = max(center - half, 0)
+            end = min(center + half + 1, imgs.shape[0])
+            imgs = imgs[start:end]
         imgs = center_crop_or_pad(imgs, patch_size)
         meta = batch['ofile']
 
