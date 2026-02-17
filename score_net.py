@@ -187,7 +187,7 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretr
     else:
         sample_cases = all_cases[:num_cases] 
     data_loader = predictor.get_data_iterator(sample_cases,
-                                        "/home/ultrai/UltrAi/nntinyunet/tmp",
+                                        "tmp",
                                         save_probabilities=False, overwrite=True,
                                         num_processes_preprocessing=2, num_processes_segmentation_export=2,
                                         folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
@@ -339,12 +339,9 @@ def main(args):
     for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
         imgs = batch['data']
         imgs = imgs.permute(1, 0, 2, 3)
-        if imgs.shape[0] > mini_batch_size:
-            center = imgs.shape[0] // 2
-            half = mini_batch_size // 2
-            start = max(center - half, 0)
-            end = min(center + half + 1, imgs.shape[0])
-            imgs = imgs[start:end]
+        # extract mini_batch_size centered at the center of the batches for volumetric data
+        vol = imgs.shape[0]
+        imgs = imgs[vol//2 - mini_batch_size//2:vol//2 + mini_batch_size//2, ...]
         imgs = center_crop_or_pad(imgs, patch_size)
         meta = batch['ofile']
 
