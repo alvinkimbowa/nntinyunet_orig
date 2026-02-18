@@ -417,7 +417,7 @@ def main(args):
                 breakdown_done = True
                 module_scores = naswot_module_contributions(model, x)
                 stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
-                block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
+                # block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
         if "az_nas" in metric_set:
             az_nas_scores.append(az_nas_score(model, x, offload_to_cpu=True))
         if "synflow" in metric_set:
@@ -520,21 +520,21 @@ def main(args):
     
     if args.naswot_breakdown and breakdown_done:
         suffix = f"{dataset_name}_{args.cfg}_b{args.batch_size}"
-        mod_path = join(args.out_dir, f"{suffix}_naswot_modules.csv")
+        # mod_path = join(args.out_dir, f"{suffix}_naswot_modules.csv")
         stage_path = join(args.out_dir, f"{suffix}_naswot_stages.csv")
-        block_path = join(args.out_dir, f"{suffix}_naswot_blocks.csv")
-        with open(mod_path, "w", encoding="utf-8") as f:
-            f.write("module,logdet\n")
-            for name, val in module_scores:
-                f.write(f"{name},{val}\n")
+        # block_path = join(args.out_dir, f"{suffix}_naswot_blocks.csv")
+        # with open(mod_path, "w", encoding="utf-8") as f:
+        #     f.write("module,logdet\n")
+        #     for name, val in module_scores:
+        #         f.write(f"{name},{val}\n")
         with open(stage_path, "w", encoding="utf-8") as f:
             f.write("stage,logdet\n")
             for name, val in stage_scores:
                 f.write(f"{name},{val}\n")
-        with open(block_path, "w", encoding="utf-8") as f:
-            f.write("block,logdet\n")
-            for name, val in block_scores:
-                f.write(f"{name},{val}\n")
+        # with open(block_path, "w", encoding="utf-8") as f:
+        #     f.write("block,logdet\n")
+        #     for name, val in block_scores:
+        #         f.write(f"{name},{val}\n")
 
     if args.save_batch_jacobian and batch_rows:
         batch_path = join(args.out_dir, f"{dataset_name}_batch_jacobian_b{args.batch_size}.csv")
