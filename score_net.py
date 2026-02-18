@@ -7,7 +7,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import nibabel as nib
 from tqdm import tqdm
+from PIL import Image
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.run.run_training import get_trainer_from_args
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
@@ -127,6 +129,30 @@ def get_num_input_channels(dataset_name):
         dataset_json = json.load(f)
     return len(dataset_json["channel_names"])
 
+def get_target(meta, dataset_name, dataset_json, slice_idx=None):
+    file_ending = dataset_json["file_ending"]
+    target_path = join(nnUNet_raw, dataset_name, "labelsTr", f"{os.path.basename(meta)}{file_ending}")
+
+    if not os.path.exists(target_path):
+        raise FileNotFoundError(f"Target label not found: {target_path}")
+
+    if file_ending in (".nii.gz", ".nii"):
+        arr = np.asarray(nib.load(target_path).get_fdata())
+        if arr.ndim == 3:
+            z = arr.shape[-1] // 2 if slice_idx is None else int(slice_idx)
+            z = max(0, min(z, arr.shape[-1] - 1))
+            arr = arr[..., z]
+        elif arr.ndim > 3:
+            arr = np.squeeze(arr)
+            if arr.ndim == 3:
+                z = arr.shape[-1] // 2 if slice_idx is None else int(slice_idx)
+                z = max(0, min(z, arr.shape[-1] - 1))
+                arr = arr[..., z]
+    else:
+        arr = np.array(Image.open(target_path))
+
+    target = torch.from_numpy(arr).float().unsqueeze(0).unsqueeze(0)
+    return target
 
 def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretrained=False, num_cases=None, chk="checkpoint_final.pth"):
     fold = fold if fold == "all" else int(fold)
@@ -338,12 +364,17 @@ def main(args):
 
     for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
         imgs = batch['data']
+        meta = batch['ofile']
+        
         imgs = imgs.permute(1, 0, 2, 3)
         # get the center slice
         center_idx = imgs.shape[0] // 2
         imgs = imgs[center_idx : center_idx + 1]
         imgs = center_crop_or_pad(imgs, patch_size)
-        meta = batch['ofile']
+        
+        dataset_json = get_dataset_json(args.train_dataset_id)
+        target = get_target(meta, dataset_name, dataset_json, slice_idx=center_idx)
+        target = center_crop_or_pad(target, patch_size)
 
         x = imgs.float().to(device)
         if args.debug_activations and not debug_done:
