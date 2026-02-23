@@ -263,13 +263,6 @@ fi
 if [ $run_inference -eq 1 ]; then
     for test_dataset_id in ${test_dataset_ids[@]}; do
         echo test_dataset_id $test_dataset_id
-        if [[ $test_dataset_id -eq $train_dataset_id ]]; then
-            split="Val"
-        elif [[ $test_dataset_id -eq 78 || $test_dataset_id -eq 79 || $test_dataset_id -eq 178 ]]; then
-            split="Ts"
-        else
-            split="Tr"
-        fi
         python inference.py \
             --train_dataset_id $train_dataset_id \
             --test_dataset_id $test_dataset_id \
