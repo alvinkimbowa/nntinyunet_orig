@@ -3,10 +3,12 @@ import csv
 import json
 import os
 from pathlib import Path
+from itertools import permutations
 
 import numpy as np
 import torch
 from PIL import Image
+import nibabel as nib
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, SurfaceDistanceMetric
 from scipy.ndimage import label
 
@@ -185,6 +187,28 @@ def extract_image_id(input_case):
     return stem
 
 
+def load_label_array(label_path):
+    if label_path.endswith(".nii.gz") or label_path.endswith(".nii"):
+        arr = np.asarray(nib.load(label_path).get_fdata())
+        # segmentation labels should be integer-valued
+        return arr.astype(np.int32, copy=False)
+    return np.array(Image.open(label_path))
+
+
+def align_label_to_prediction_shape(label_arr, pred_arr):
+    if label_arr.shape == pred_arr.shape:
+        return label_arr
+
+    # Common case for NIfTI labels: axis ordering differs (for example HWD vs DHW).
+    if label_arr.ndim == pred_arr.ndim == 3:
+        for perm in permutations(range(3)):
+            cand = np.transpose(label_arr, perm)
+            if cand.shape == pred_arr.shape:
+                return cand
+
+    return None
+
+
 def evaluate_and_save_streaming(
     predictor,
     input_cases,
@@ -237,7 +261,7 @@ def evaluate_and_save_streaming(
                 label_path = get_label_path_from_input(case, split)
                 if not os.path.exists(label_path):
                     continue
-                label = np.array(Image.open(label_path))
+                label = load_label_array(label_path)
 
                 pred_arr = np.squeeze(np.asarray(pred))
                 label_arr = np.squeeze(np.asarray(label))
@@ -254,6 +278,16 @@ def evaluate_and_save_streaming(
                         f"pred {pred_arr.shape} vs label {label_arr.shape}"
                     )
                     continue
+
+                if pred_arr.shape != label_arr.shape:
+                    aligned_label = align_label_to_prediction_shape(label_arr, pred_arr)
+                    if aligned_label is None:
+                        print(
+                            f"warning: skip {extract_image_id(case)} due to incompatible shapes: "
+                            f"pred {pred_arr.shape} vs label {label_arr.shape}"
+                        )
+                        continue
+                    label_arr = aligned_label
 
                 if pred_arr.ndim == 2:
                     pred_t = torch.tensor(pred_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
