@@ -11,6 +11,7 @@ from PIL import Image
 import nibabel as nib
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, SurfaceDistanceMetric
 from scipy.ndimage import label
+from tqdm import tqdm
 
 from batchgenerators.utilities.file_and_folder_operations import join
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
@@ -209,21 +210,112 @@ def align_label_to_prediction_shape(label_arr, pred_arr):
     return None
 
 
+def _as_int_list(v):
+    if isinstance(v, (list, tuple)):
+        return [int(x) for x in v]
+    return [int(v)]
+
+
+def infer_multilabel_from_dataset_json(dataset_json):
+    labels = dataset_json.get("labels", {})
+    if not isinstance(labels, dict) or len(labels) == 0:
+        return False
+
+    non_bg_vals = [v for k, v in labels.items() if str(k).lower() != "background"]
+    has_region_lists = any(isinstance(v, (list, tuple)) for v in non_bg_vals)
+    has_regions_order = isinstance(dataset_json.get("regions_class_order", None), list)
+    return bool(has_region_lists and has_regions_order)
+
+
+def build_multilabel_region_defs(dataset_json):
+    labels = dataset_json.get("labels", {})
+    if not isinstance(labels, dict) or len(labels) == 0:
+        return []
+
+    non_bg_items = [(k, v) for k, v in labels.items() if str(k).lower() != "background"]
+    if len(non_bg_items) == 0:
+        return []
+
+    regions_class_order = dataset_json.get("regions_class_order", None)
+    region_defs = []
+
+    if isinstance(regions_class_order, list) and len(regions_class_order) == len(non_bg_items):
+        # Region-based nnU-Net setup with label-map output:
+        # prediction is a single integer map (0/1/2/3...), so each region mask
+        # must be reconstructed from its full label set (for example WT={1,2,3}).
+        # regions_class_order defines region ordering, not singleton mask ids.
+        for (name, target_v), _pred_id in zip(non_bg_items, regions_class_order):
+            ids = _as_int_list(target_v)
+            region_defs.append(
+                {
+                    "name": str(name),
+                    "target_ids": ids,
+                    "pred_ids": ids,
+                }
+            )
+        return region_defs
+
+    # Fallback: assume standard class ids and match pred ids to target ids.
+    for name, target_v in non_bg_items:
+        ids = _as_int_list(target_v)
+        region_defs.append(
+            {
+                "name": str(name),
+                "target_ids": ids,
+                "pred_ids": ids,
+            }
+        )
+    return region_defs
+
+
+def convert_to_multilabel_tensors(pred_arr, label_arr, region_defs, include_background=True):
+    pred_ch = []
+    label_ch = []
+    pred_any = np.zeros_like(pred_arr, dtype=bool)
+    label_any = np.zeros_like(label_arr, dtype=bool)
+    for rd in region_defs:
+        p = np.isin(pred_arr, rd["pred_ids"])
+        l = np.isin(label_arr, rd["target_ids"])
+        pred_any |= p
+        label_any |= l
+        pred_ch.append(p.astype(np.float32))
+        label_ch.append(l.astype(np.float32))
+
+    if include_background:
+        bg_pred = (~pred_any).astype(np.float32)
+        bg_label = (~label_any).astype(np.float32)
+        pred_ch = [bg_pred] + pred_ch
+        label_ch = [bg_label] + label_ch
+
+    pred_ml = np.stack(pred_ch, axis=0)
+    label_ml = np.stack(label_ch, axis=0)
+    pred_t = torch.tensor(pred_ml, dtype=torch.float32).unsqueeze(0)
+    label_t = torch.tensor(label_ml, dtype=torch.float32).unsqueeze(0)
+    return pred_t, label_t
+
+
 def evaluate_and_save_streaming(
     predictor,
     input_cases,
     output_targets,
     test_dataset_name,
+    dataset_json,
     split,
     mini_batch_size,
     largest_component,
     num_classes,
+    multi_label,
     results_csv_path,
     overwrite,
 ):
-    dice_metric = DiceMetric(include_background=False, reduction="mean")
-    hd95_metric = HausdorffDistanceMetric(include_background=False, reduction="mean", percentile=95)
-    masd_metric = SurfaceDistanceMetric(include_background=False, reduction="mean")
+    # Reuse metric objects across all cases to avoid per-case re-instantiation overhead.
+    d_img = DiceMetric(include_background=False, reduction="mean", ignore_empty=False)
+    h_img = HausdorffDistanceMetric(
+        include_background=False,
+        reduction="mean",
+        percentile=95,
+    )
+    m_img = SurfaceDistanceMetric(include_background=False, reduction="mean")
 
     image_wise_csv_path = os.path.join(
         os.path.dirname(results_csv_path),
@@ -232,118 +324,165 @@ def evaluate_and_save_streaming(
     os.makedirs(os.path.dirname(results_csv_path), exist_ok=True)
     os.makedirs(os.path.dirname(image_wise_csv_path), exist_ok=True)
 
+    region_defs = build_multilabel_region_defs(dataset_json) if multi_label else []
+    if multi_label:
+        if len(region_defs) == 0:
+            raise RuntimeError("multi_label=True but no valid labels/regions found in dataset.json")
+        region_info = ", ".join(
+            [f"{r['name']} pred={r['pred_ids']} target={r['target_ids']}" for r in region_defs]
+        )
+        print(f"Multi-label evaluation enabled (include_background=False) with regions: {region_info}")
+
+    def _finite_or_none(x):
+        x = float(x)
+        return x if np.isfinite(x) else None
+
+    def _fmt_csv_value(x, nd=2):
+        return "" if x is None else f"{float(x):.{nd}f}"
+
     with open(image_wise_csv_path, "w", newline="") as f_img:
         img_writer = csv.DictWriter(f_img, fieldnames=["image_id", "dice", "hd95", "masd"])
         img_writer.writeheader()
 
         n_total = 0
-        for idx_chunk, case_chunk in enumerate(chunk_list(input_cases, mini_batch_size)):
-            out_chunk = None if output_targets is None else output_targets[idx_chunk * mini_batch_size : idx_chunk * mini_batch_size + len(case_chunk)]
+        dice_vals = []
+        hd95_vals = []
+        masd_vals = []
+        metrics_pbar = tqdm(total=len(input_cases), desc="Metrics", unit="case", leave=True)
+        try:
+            for idx_chunk, case_chunk in enumerate(chunk_list(input_cases, mini_batch_size)):
+                out_chunk = None if output_targets is None else output_targets[idx_chunk * mini_batch_size : idx_chunk * mini_batch_size + len(case_chunk)]
 
-            preds = predictor.predict_from_files(
-                case_chunk,
-                out_chunk,
-                save_probabilities=False,
-                overwrite=overwrite,
-                num_processes_preprocessing=2,
-                num_processes_segmentation_export=2,
-                folder_with_segs_from_prev_stage=None,
-                num_parts=1,
-                part_id=0,
-            )
+                preds = predictor.predict_from_files(
+                    case_chunk,
+                    out_chunk,
+                    save_probabilities=False,
+                    overwrite=overwrite,
+                    num_processes_preprocessing=2,
+                    num_processes_segmentation_export=2,
+                    folder_with_segs_from_prev_stage=None,
+                    num_parts=1,
+                    part_id=0,
+                )
 
-            for case, pred in zip(case_chunk, preds):
-                if pred is None:
-                    continue
-                if largest_component:
-                    pred = find_largest_component_per_class(pred, num_classes)
+                for case, pred in zip(case_chunk, preds):
+                    if pred is None:
+                        metrics_pbar.update(1)
+                        continue
+                    if largest_component:
+                        pred = find_largest_component_per_class(pred, num_classes)
 
-                label_path = get_label_path_from_input(case, split)
-                if not os.path.exists(label_path):
-                    continue
-                label = load_label_array(label_path)
+                    label_path = get_label_path_from_input(case, split)
+                    if not os.path.exists(label_path):
+                        metrics_pbar.update(1)
+                        continue
+                    label = load_label_array(label_path)
 
-                pred_arr = np.squeeze(np.asarray(pred))
-                label_arr = np.squeeze(np.asarray(label))
+                    pred_arr = np.squeeze(np.asarray(pred))
+                    label_arr = np.squeeze(np.asarray(label))
 
-                # Harmonize singleton dimensions (for example prediction as [1, H, W]).
-                if pred_arr.ndim == label_arr.ndim + 1 and pred_arr.shape[0] == 1:
-                    pred_arr = pred_arr[0]
-                if label_arr.ndim == pred_arr.ndim + 1 and label_arr.shape[0] == 1:
-                    label_arr = label_arr[0]
+                    # Harmonize singleton dimensions (for example prediction as [1, H, W]).
+                    if pred_arr.ndim == label_arr.ndim + 1 and pred_arr.shape[0] == 1:
+                        pred_arr = pred_arr[0]
+                    if label_arr.ndim == pred_arr.ndim + 1 and label_arr.shape[0] == 1:
+                        label_arr = label_arr[0]
 
-                if pred_arr.ndim != label_arr.ndim:
-                    print(
-                        f"warning: skip {extract_image_id(case)} due to incompatible dims: "
-                        f"pred {pred_arr.shape} vs label {label_arr.shape}"
-                    )
-                    continue
-
-                if pred_arr.shape != label_arr.shape:
-                    aligned_label = align_label_to_prediction_shape(label_arr, pred_arr)
-                    if aligned_label is None:
+                    if pred_arr.ndim != label_arr.ndim:
                         print(
-                            f"warning: skip {extract_image_id(case)} due to incompatible shapes: "
+                            f"warning: skip {extract_image_id(case)} due to incompatible dims: "
                             f"pred {pred_arr.shape} vs label {label_arr.shape}"
                         )
+                        metrics_pbar.update(1)
                         continue
-                    label_arr = aligned_label
 
-                if pred_arr.ndim == 2:
-                    pred_t = torch.tensor(pred_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                    label_t = torch.tensor(label_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                elif pred_arr.ndim == 3:
-                    pred_t = torch.tensor(pred_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                    label_t = torch.tensor(label_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                else:
-                    print(
-                        f"warning: skip {extract_image_id(case)} due to unsupported dims: "
-                        f"pred {pred_arr.shape} vs label {label_arr.shape}"
+                    if pred_arr.shape != label_arr.shape:
+                        aligned_label = align_label_to_prediction_shape(label_arr, pred_arr)
+                        if aligned_label is None:
+                            print(
+                                f"warning: skip {extract_image_id(case)} due to incompatible shapes: "
+                                f"pred {pred_arr.shape} vs label {label_arr.shape}"
+                            )
+                            metrics_pbar.update(1)
+                            continue
+                        label_arr = aligned_label
+
+                    if pred_arr.ndim not in (2, 3):
+                        print(
+                            f"warning: skip {extract_image_id(case)} due to unsupported dims: "
+                            f"pred {pred_arr.shape} vs label {label_arr.shape}"
+                        )
+                        metrics_pbar.update(1)
+                        continue
+
+                    if multi_label:
+                        pred_t, label_t = convert_to_multilabel_tensors(
+                            pred_arr,
+                            label_arr,
+                            region_defs,
+                            include_background=False,
+                        )
+                    else:
+                        pred_t = torch.tensor(pred_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                        label_t = torch.tensor(label_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+
+                    # per-image metrics (saved immediately); metrics objects are reused.
+                    d_img.reset()
+                    h_img.reset()
+                    m_img.reset()
+                    d_img(pred_t, label_t)
+                    h_img(pred_t, label_t)
+                    m_img(pred_t, label_t)
+
+                    dice_val = float(d_img.aggregate().item() * 100)
+                    hd95_val = float(h_img.aggregate().item())
+                    masd_val = float(m_img.aggregate().item())
+                    dice_val = _finite_or_none(dice_val)
+                    hd95_val = _finite_or_none(hd95_val)
+                    masd_val = _finite_or_none(masd_val)
+                    if dice_val is not None:
+                        dice_vals.append(dice_val)
+                    if hd95_val is not None:
+                        hd95_vals.append(hd95_val)
+                    if masd_val is not None:
+                        masd_vals.append(masd_val)
+
+                    img_writer.writerow(
+                        {
+                            "image_id": extract_image_id(case),
+                            "dice": _fmt_csv_value(dice_val),
+                            "hd95": _fmt_csv_value(hd95_val),
+                            "masd": _fmt_csv_value(masd_val),
+                        }
                     )
-                    continue
-
-                # update global metrics
-                dice_metric(pred_t, label_t)
-                hd95_metric(pred_t, label_t)
-                masd_metric(pred_t, label_t)
-
-                # per-image metrics (saved immediately)
-                d_tmp = DiceMetric(include_background=False, reduction="mean")
-                h_tmp = HausdorffDistanceMetric(include_background=False, reduction="mean", percentile=95)
-                m_tmp = SurfaceDistanceMetric(include_background=False, reduction="mean")
-                d_tmp(pred_t, label_t)
-                h_tmp(pred_t, label_t)
-                m_tmp(pred_t, label_t)
-
-                dice_val = float(d_tmp.aggregate().item() * 100)
-                hd95_val = float(h_tmp.aggregate().item())
-                masd_val = float(m_tmp.aggregate().item())
-
-                img_writer.writerow(
-                    {
-                        "image_id": extract_image_id(case),
-                        "dice": f"{dice_val:.2f}",
-                        "hd95": f"{hd95_val:.2f}",
-                        "masd": f"{masd_val:.2f}",
-                    }
-                )
-                n_total += 1
+                    n_total += 1
+                    metrics_pbar.update(1)
+        finally:
+            metrics_pbar.close()
 
     if n_total == 0:
         print("No evaluable predictions found.")
         return
 
-    dice_score = float(dice_metric.aggregate().item() * 100)
-    dice_std = float(dice_metric.get_buffer().std().item() * 100)
-    hd95_score = float(hd95_metric.aggregate().item())
-    hd95_std = float(hd95_metric.get_buffer().std().item())
-    masd_score = float(masd_metric.aggregate().item())
-    masd_std = float(masd_metric.get_buffer().std().item())
+    def _finite_stats(values):
+        arr = np.asarray(values, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return None, None
+        mean = float(np.mean(arr))
+        std = float(np.std(arr))  # population std to avoid NaN for n=1
+        return mean, std
+
+    dice_score, dice_std = _finite_stats(dice_vals)
+    hd95_score, hd95_std = _finite_stats(hd95_vals)
+    masd_score, masd_std = _finite_stats(masd_vals)
 
     print("\n")
-    print(f"Dice: {dice_score:.2f}% ± {dice_std:.2f}%")
-    print(f"HD95: {hd95_score:.2f} ± {hd95_std:.2f}")
-    print(f"MASD: {masd_score:.2f} ± {masd_std:.2f}")
+    dice_msg = f"{dice_score:.2f}% ± {dice_std:.2f}%" if dice_score is not None else "n/a"
+    hd95_msg = f"{hd95_score:.2f} ± {hd95_std:.2f}" if hd95_score is not None else "n/a"
+    masd_msg = f"{masd_score:.2f} ± {masd_std:.2f}" if masd_score is not None else "n/a"
+    print(f"Dice: {dice_msg}")
+    print(f"HD95: {hd95_msg}")
+    print(f"MASD: {masd_msg}")
 
     csv_exists = os.path.exists(results_csv_path) and os.path.getsize(results_csv_path) > 0
     with open(results_csv_path, "a", newline="") as f:
@@ -356,12 +495,12 @@ def evaluate_and_save_streaming(
         writer.writerow(
             {
                 "test_dataset_name": test_dataset_name,
-                "dice": f"{dice_score:.2f}",
-                "dice_std": f"{dice_std:.2f}",
-                "hd95": f"{hd95_score:.2f}",
-                "hd95_std": f"{hd95_std:.2f}",
-                "masd": f"{masd_score:.2f}",
-                "masd_std": f"{masd_std:.2f}",
+                "dice": _fmt_csv_value(dice_score),
+                "dice_std": _fmt_csv_value(dice_std),
+                "hd95": _fmt_csv_value(hd95_score),
+                "hd95_std": _fmt_csv_value(hd95_std),
+                "masd": _fmt_csv_value(masd_score),
+                "masd_std": _fmt_csv_value(masd_std),
             }
         )
 
@@ -394,6 +533,8 @@ def main():
 
     dataset_json = load_dataset_json(nnUNet_raw, test_dataset_name)
     num_classes = len(dataset_json["labels"])
+    multi_label_mode = infer_multilabel_from_dataset_json(dataset_json)
+    print(f"Evaluation mode: {'multi-label' if multi_label_mode else 'multi-class'}")
 
     for f in eval_folds:
         predictor, mini_batch_size = load_pretrained_predictor_and_minibatch(
@@ -451,10 +592,12 @@ def main():
             input_cases=input_cases,
             output_targets=output_targets,
             test_dataset_name=test_dataset_name,
+            dataset_json=dataset_json,
             split=split,
             mini_batch_size=mini_batch_size,
             largest_component=args.largest_component,
             num_classes=num_classes,
+            multi_label=multi_label_mode,
             results_csv_path=results_csv_path,
             overwrite=args.overwrite,
         )
