@@ -402,6 +402,7 @@ def evaluate_and_save_streaming(
         os.path.dirname(results_csv_path),
         f"image_wise_{os.path.basename(results_csv_path).replace('.csv', '')}_{test_dataset_name}.csv",
     )
+    image_wise_csv_tmp_path = f"{image_wise_csv_path}.tmp"
     os.makedirs(os.path.dirname(results_csv_path), exist_ok=True)
     os.makedirs(os.path.dirname(image_wise_csv_path), exist_ok=True)
 
@@ -425,7 +426,7 @@ def evaluate_and_save_streaming(
     def _fmt_csv_value(x, nd=2):
         return "" if x is None else f"{float(x):.{nd}f}"
 
-    with open(image_wise_csv_path, "w", newline="") as f_img:
+    with open(image_wise_csv_tmp_path, "w", newline="") as f_img:
         img_writer = csv.DictWriter(f_img, fieldnames=["image_id", "dice", "hd95", "masd"])
         img_writer.writeheader()
 
@@ -570,8 +571,11 @@ def evaluate_and_save_streaming(
             metrics_pbar.close()
 
     if n_total == 0:
+        if os.path.exists(image_wise_csv_tmp_path):
+            os.remove(image_wise_csv_tmp_path)
         print("No evaluable predictions found.")
         return
+    os.replace(image_wise_csv_tmp_path, image_wise_csv_path)
 
     dice_score, dice_std = finite_stats(dice_vals)
     hd95_score, hd95_std = finite_stats(hd95_vals)
@@ -585,14 +589,12 @@ def evaluate_and_save_streaming(
     print(f"HD95: {hd95_msg}")
     print(f"MASD: {masd_msg}")
 
-    csv_exists = os.path.exists(results_csv_path) and os.path.getsize(results_csv_path) > 0
-    with open(results_csv_path, "a", newline="") as f:
+    with open(results_csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=["test_dataset_name", "class_index", "class_name", "dice", "dice_std", "hd95", "hd95_std", "masd", "masd_std"],
         )
-        if not csv_exists:
-            writer.writeheader()
+        writer.writeheader()
 
         for ci in class_infos:
             class_name = ci["name"]
