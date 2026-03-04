@@ -294,6 +294,80 @@ def convert_to_multilabel_tensors(pred_arr, label_arr, region_defs, include_back
     return pred_t, label_t
 
 
+def convert_to_multiclass_onehot_tensors(pred_arr, label_arr, num_classes):
+    pred_ch = []
+    label_ch = []
+    for cls in range(num_classes):
+        pred_ch.append((pred_arr == cls).astype(np.float32))
+        label_ch.append((label_arr == cls).astype(np.float32))
+
+    pred_oh = np.stack(pred_ch, axis=0)
+    label_oh = np.stack(label_ch, axis=0)
+    pred_t = torch.tensor(pred_oh, dtype=torch.float32).unsqueeze(0)
+    label_t = torch.tensor(label_oh, dtype=torch.float32).unsqueeze(0)
+    return pred_t, label_t
+
+
+def get_foreground_class_infos(dataset_json, multi_label):
+    if multi_label:
+        return [{"index": i + 1, "name": rd["name"]} for i, rd in enumerate(build_multilabel_region_defs(dataset_json))]
+
+    labels = dataset_json.get("labels", {})
+    class_infos = []
+    for name, value in labels.items():
+        if str(name).lower() == "background":
+            continue
+        if isinstance(value, (list, tuple)):
+            continue
+        class_infos.append({"index": int(value), "name": str(name)})
+    class_infos.sort(key=lambda x: x["index"])
+    return class_infos
+
+
+def metric_tensor_to_list(metric_value):
+    arr = torch.as_tensor(metric_value).detach().cpu().numpy().astype(float).reshape(-1)
+    return [float(x) for x in arr]
+
+
+def finite_stats(values):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None, None
+    mean = float(np.mean(arr))
+    std = float(np.std(arr))  # population std to avoid NaN for n=1
+    return mean, std
+
+
+def build_table_row_values(per_class_metrics, dice_score, dice_std, hd95_score, hd95_std):
+    preferred_class_order = ["Capsule", "Cortex", "Medulla", "CEC"]
+    metrics_by_name = {}
+    for class_name, class_store in per_class_metrics.items():
+        metrics_by_name[class_name.lower()] = (class_name, class_store)
+
+    def _fmt_pm(mean, std):
+        if mean is None or std is None:
+            return "-"
+        return f"{float(mean):.2f}±{float(std):.2f}"
+
+    row_values = []
+    for preferred_name in preferred_class_order:
+        match = metrics_by_name.get(preferred_name.lower())
+        if match is None:
+            row_values.extend(["-", "-"])
+            continue
+
+        _, class_store = match
+        dice_score_cls, dice_std_cls = finite_stats(class_store["dice"])
+        hd95_score_cls, hd95_std_cls = finite_stats(class_store["hd95"])
+        row_values.append(_fmt_pm(dice_score_cls, dice_std_cls))
+        row_values.append(_fmt_pm(hd95_score_cls, hd95_std_cls))
+
+    row_values.append(_fmt_pm(dice_score, dice_std))
+    row_values.append(_fmt_pm(hd95_score, hd95_std))
+    return row_values
+
+
 def evaluate_and_save_streaming(
     predictor,
     input_cases,
@@ -316,6 +390,13 @@ def evaluate_and_save_streaming(
         percentile=95,
     )
     m_img = SurfaceDistanceMetric(include_background=False, reduction="mean")
+    d_img_per_class = DiceMetric(include_background=False, reduction="none", ignore_empty=False)
+    h_img_per_class = HausdorffDistanceMetric(
+        include_background=False,
+        reduction="none",
+        percentile=95,
+    )
+    m_img_per_class = SurfaceDistanceMetric(include_background=False, reduction="none")
 
     image_wise_csv_path = os.path.join(
         os.path.dirname(results_csv_path),
@@ -325,6 +406,10 @@ def evaluate_and_save_streaming(
     os.makedirs(os.path.dirname(image_wise_csv_path), exist_ok=True)
 
     region_defs = build_multilabel_region_defs(dataset_json) if multi_label else []
+    class_infos = get_foreground_class_infos(dataset_json, multi_label)
+    per_class_metrics = {
+        ci["name"]: {"dice": [], "hd95": [], "masd": [], "index": ci["index"]} for ci in class_infos
+    }
     if multi_label:
         if len(region_defs) == 0:
             raise RuntimeError("multi_label=True but no valid labels/regions found in dataset.json")
@@ -419,26 +504,51 @@ def evaluate_and_save_streaming(
                             pred_arr,
                             label_arr,
                             region_defs,
-                            include_background=False,
+                            include_background=True,
                         )
                     else:
-                        pred_t = torch.tensor(pred_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                        label_t = torch.tensor(label_arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                        pred_t, label_t = convert_to_multiclass_onehot_tensors(
+                            pred_arr,
+                            label_arr,
+                            num_classes,
+                        )
 
                     # per-image metrics (saved immediately); metrics objects are reused.
                     d_img.reset()
                     h_img.reset()
                     m_img.reset()
+                    d_img_per_class.reset()
+                    h_img_per_class.reset()
+                    m_img_per_class.reset()
                     d_img(pred_t, label_t)
                     h_img(pred_t, label_t)
                     m_img(pred_t, label_t)
+                    d_img_per_class(pred_t, label_t)
+                    h_img_per_class(pred_t, label_t)
+                    m_img_per_class(pred_t, label_t)
 
                     dice_val = float(d_img.aggregate().item() * 100)
                     hd95_val = float(h_img.aggregate().item())
                     masd_val = float(m_img.aggregate().item())
+                    dice_per_class = [v * 100 for v in metric_tensor_to_list(d_img_per_class.aggregate())]
+                    hd95_per_class = metric_tensor_to_list(h_img_per_class.aggregate())
+                    masd_per_class = metric_tensor_to_list(m_img_per_class.aggregate())
                     dice_val = _finite_or_none(dice_val)
                     hd95_val = _finite_or_none(hd95_val)
                     masd_val = _finite_or_none(masd_val)
+                    for ci, dice_cls, hd95_cls, masd_cls in zip(
+                        class_infos, dice_per_class, hd95_per_class, masd_per_class
+                    ):
+                        class_store = per_class_metrics[ci["name"]]
+                        dice_cls = _finite_or_none(dice_cls)
+                        hd95_cls = _finite_or_none(hd95_cls)
+                        masd_cls = _finite_or_none(masd_cls)
+                        if dice_cls is not None:
+                            class_store["dice"].append(dice_cls)
+                        if hd95_cls is not None:
+                            class_store["hd95"].append(hd95_cls)
+                        if masd_cls is not None:
+                            class_store["masd"].append(masd_cls)
                     if dice_val is not None:
                         dice_vals.append(dice_val)
                     if hd95_val is not None:
@@ -463,18 +573,9 @@ def evaluate_and_save_streaming(
         print("No evaluable predictions found.")
         return
 
-    def _finite_stats(values):
-        arr = np.asarray(values, dtype=float)
-        arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return None, None
-        mean = float(np.mean(arr))
-        std = float(np.std(arr))  # population std to avoid NaN for n=1
-        return mean, std
-
-    dice_score, dice_std = _finite_stats(dice_vals)
-    hd95_score, hd95_std = _finite_stats(hd95_vals)
-    masd_score, masd_std = _finite_stats(masd_vals)
+    dice_score, dice_std = finite_stats(dice_vals)
+    hd95_score, hd95_std = finite_stats(hd95_vals)
+    masd_score, masd_std = finite_stats(masd_vals)
 
     print("\n")
     dice_msg = f"{dice_score:.2f}% ± {dice_std:.2f}%" if dice_score is not None else "n/a"
@@ -488,23 +589,40 @@ def evaluate_and_save_streaming(
     with open(results_csv_path, "a", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["test_dataset_name", "dice", "dice_std", "hd95", "hd95_std", "masd", "masd_std"],
+            fieldnames=["test_dataset_name", "class_index", "class_name", "dice", "dice_std", "hd95", "hd95_std", "masd", "masd_std"],
         )
         if not csv_exists:
             writer.writeheader()
-        writer.writerow(
-            {
-                "test_dataset_name": test_dataset_name,
-                "dice": _fmt_csv_value(dice_score),
-                "dice_std": _fmt_csv_value(dice_std),
-                "hd95": _fmt_csv_value(hd95_score),
-                "hd95_std": _fmt_csv_value(hd95_std),
-                "masd": _fmt_csv_value(masd_score),
-                "masd_std": _fmt_csv_value(masd_std),
-            }
-        )
 
-    print(f"Results saved to: {results_csv_path}")
+        for ci in class_infos:
+            class_name = ci["name"]
+            class_store = per_class_metrics[class_name]
+            dice_score_cls, dice_std_cls = finite_stats(class_store["dice"])
+            hd95_score_cls, hd95_std_cls = finite_stats(class_store["hd95"])
+            masd_score_cls, masd_std_cls = finite_stats(class_store["masd"])
+            writer.writerow(
+                {
+                    "test_dataset_name": test_dataset_name,
+                    "class_index": ci["index"],
+                    "class_name": class_name,
+                    "dice": _fmt_csv_value(dice_score_cls),
+                    "dice_std": _fmt_csv_value(dice_std_cls),
+                    "hd95": _fmt_csv_value(hd95_score_cls),
+                    "hd95_std": _fmt_csv_value(hd95_std_cls),
+                    "masd": _fmt_csv_value(masd_score_cls),
+                    "masd_std": _fmt_csv_value(masd_std_cls),
+                }
+            )
+
+    table_row_txt_path = os.path.join(os.path.dirname(results_csv_path), f"{Path(results_csv_path).stem}_table_row.txt")
+    table_row_values = build_table_row_values(per_class_metrics, dice_score, dice_std, hd95_score, hd95_std)
+    table_row_text = ",".join(table_row_values)
+    with open(table_row_txt_path, "w") as f:
+        f.write(table_row_text + "\n")
+
+    print(f"Per-class results saved to: {results_csv_path}")
+    print(f"Table row saved to: {table_row_txt_path}")
+    print(f"Table row: {table_row_text}")
     print(f"Image-wise results saved to: {image_wise_csv_path}\n")
 
 
@@ -517,10 +635,7 @@ def main():
     if split not in ["Tr", "Val", "Ts"]:
         raise ValueError(f"split must be either 'Tr', 'Val' or 'Ts', got {split}")
 
-    if args.gpu < 0:
-        device = torch.device("cpu")
-    else:
-        device = torch.device("cuda", args.gpu)
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     train_dataset_name = get_dataset_name(nnUNet_raw, train_dataset_id)
     test_dataset_name = get_dataset_name(nnUNet_raw, test_dataset_id)
