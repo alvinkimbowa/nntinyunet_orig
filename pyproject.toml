@@ -1,0 +1,14 @@
+[project]
+name = "nntinyunet"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+    "nnunetv2>=2.7.0"
+]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu126"
