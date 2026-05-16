@@ -48,7 +48,7 @@ def build_arg_parser():
     parser.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
     parser.add_argument("--batch_size", type=str, default="all", help="batch size for scoring")
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=369)
     parser.add_argument("--out_dir", type=str, default="results/nas_metrics")
     parser.add_argument("--save_batch_jacobian", action="store_true",
                         help="save per-batch jacobian with image ids")
@@ -480,7 +480,7 @@ def score_config(args, cfg, device, metric_set):
     )
     print("\n")
     print(line)
-    out_file = join(args.out_dir, f"{dataset_name}_metrics_b{batch_size}.csv")
+    out_file = join(args.out_dir, f"{dataset_name}_metrics_b{batch_size}_seed{args.seed}.csv")
     if args.use_pretrained:
         out_file = out_file.replace("metrics_", "metrics_pretrained_")
     print("out_file", out_file)
