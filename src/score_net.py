@@ -404,7 +404,7 @@ def main(args):
     if jacobian_scores:
         jac_arr = np.asarray(jacobian_scores, dtype=np.float64)
         jac_arr = jac_arr[np.isfinite(jac_arr)]
-        jacobian_avg = float(np.sqrt(np.sum(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
+        jacobian_avg = float(np.sqrt(np.mean(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
     else:
         jacobian_avg = float("nan")
     
