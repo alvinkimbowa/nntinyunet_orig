@@ -330,6 +330,27 @@ def main(args):
         target = center_crop_or_pad(target, patch_size)
 
         x = imgs.float().to(device)
+        
+        # Compute Jacobian score
+        if "jacobian" in metric_set:
+            jac = jacobian_score(model, x, loss_fn=loss_fn)
+            jacobian_scores.append(jac)
+            if args.save_batch_jacobian:
+                img_ids = os.path.basename(meta)
+                if isinstance(img_ids, (list, tuple)):
+                    img_ids = ";".join(img_ids)
+                batch_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "cfg": args.cfg,
+                        "batch": i,
+                        "jacobian": jac,
+                        "img_ids": img_ids,
+                        "seed": args.seed,
+                    }
+                )
+        
+        # Compute other NAS metrics
         if "swap" in metric_set:
             if args.save_swap_codes:
                 swap_codes, swap_nbits = collect_swap_packed_codes(model, x)
@@ -378,24 +399,16 @@ def main(args):
                 naswot_scores.append(naswot_score(model, x))
         if "az_nas" in metric_set:
             az_nas_scores.append(az_nas_score(model, x, offload_to_cpu=True))
-        if "jacobian" in metric_set:
-            jac = jacobian_score(model, x, loss_fn=loss_fn)
-            jacobian_scores.append(jac)
-            if args.save_batch_jacobian:
-                img_ids = os.path.basename(meta)
-                if isinstance(img_ids, (list, tuple)):
-                    img_ids = ";".join(img_ids)
-                batch_rows.append(
-                    {
-                        "dataset": dataset_name,
-                        "cfg": args.cfg,
-                        "batch": i,
-                        "jacobian": jac,
-                        "img_ids": img_ids,
-                        "seed": args.seed,
-                    }
-                )
     
+    # Aggregate Jacobian score
+    if jacobian_scores:
+        jac_arr = np.asarray(jacobian_scores, dtype=np.float64)
+        jac_arr = jac_arr[np.isfinite(jac_arr)]
+        jacobian_avg = float(np.sqrt(np.sum(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
+    else:
+        jacobian_avg = float("nan")
+    
+    # Aggregate other NAS metrics    
     if args.save_swap_codes:
         merged_swap_codes = {k: np.concatenate(v, axis=0) for k, v in swap_packed_codes.items()}
         swap_codes_path = join(args.out_dir, f"{dataset_name}_{args.cfg}_b{args.batch_size}_swap_codes.npz")
@@ -429,13 +442,11 @@ def main(args):
     else:
         ncd_swap_avg = float(np.nanmean(ncd_swap_scores)) if ncd_swap_scores else float("nan")
     az_nas_avg = float(np.nanmean(az_nas_scores)) if az_nas_scores else float("nan")
-    if jacobian_scores:
-        jac_arr = np.asarray(jacobian_scores, dtype=np.float64)
-        jac_arr = jac_arr[np.isfinite(jac_arr)]
-        jacobian_avg = float(np.sqrt(np.sum(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
-    else:
-        jacobian_avg = float("nan")
+
+    # Compute model parameters
     params = sum(p.numel() for p in model.parameters())
+
+    # Compile and save model NAS metrics results
     line = (
         f"params={params} swap={swap_avg} naswot={naswot_avg} "
         f"ncd_naswot={ncd_naswot_avg} ncd_swap={ncd_swap_avg} "
