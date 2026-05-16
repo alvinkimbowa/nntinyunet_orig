@@ -69,15 +69,26 @@ $nnUNet_preprocessed/DatasetXXX_MyDataset/
 ## 4. Get XTinyU-Net Config
 
 ```bash
-uv run python src/get_xtinyunet_config.py --plans /path/to/nnUNetPlans.json
+uv run python src/generate_candidate_configs.py --plans /path/to/nnUNetPlans.json
 ```
 
 Example:
 
 ```bash
-uv run python src/get_xtinyunet_config.py \
+uv run python src/generate_candidate_configs.py \
   --plans "$nnUNet_preprocessed/Dataset300_MyDataset/nnUNetPlans.json"
 ```
+
+Run the score function. This defaults to the Jacobian score:
+
+```bash
+uv run python src/score_net.py \
+  --train_dataset_id DATASET_ID \
+  --plans nnUNetPlans \
+  --trainer nnUNetTrainer \
+  --cfg XTINY_CONFIG
+```
+
 
 This returns the XTinyU-Net config.
 
