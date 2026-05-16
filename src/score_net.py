@@ -190,11 +190,21 @@ def load_nnunet_model(train_dataset_id, plans, trainer, cfg, fold, device, pretr
         sample_cases = all_cases
     else:
         sample_cases = all_cases[:num_cases] 
-    data_loader = predictor.get_data_iterator(sample_cases,
-                                        "tmp",
-                                        save_probabilities=False, overwrite=True,
-                                        num_processes_preprocessing=2, num_processes_segmentation_export=2,
-                                        folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
+    input_lists, output_filenames, seg_from_prev_stage_files = predictor._manage_input_and_output_lists(
+        sample_cases,
+        "tmp",
+        None,
+        True,
+        0,
+        1,
+        False,
+    )
+    data_loader = predictor._internal_get_data_iterator_from_lists_of_filenames(
+        input_lists,
+        seg_from_prev_stage_files,
+        output_filenames,
+        2,
+    )
     
     return model, dataset_name, loss_fn, data_loader, num_train, mini_batch_size, patch_size
 
@@ -277,6 +287,7 @@ def main(args):
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
     metric_set = {m.strip().lower() for m in args.metrics if m.strip()}
+    os.makedirs(args.out_dir, exist_ok=True)
 
     model, dataset_name, loss_fn, data_loader, num_train, mini_batch_size, patch_size = load_nnunet_model(
         args.train_dataset_id,
@@ -290,7 +301,7 @@ def main(args):
         chk=args.chk,
     )
     
-    if args.batch_size == -1:
+    if args.batch_size is None:
         args.batch_size = "all"
     
     print("num_train", num_train)
@@ -461,10 +472,10 @@ def main(args):
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
         if need_header:
-            f.write("cfg,params,swap,naswot,ncd_naswot,ncd_swap,az_nas,jacobian\n")
+            f.write("cfg,params,jacobian,swap,naswot,ncd_naswot,ncd_swap,az_nas\n")
         f.write(
-            f"{args.cfg},{params},{swap_avg},{naswot_avg},{ncd_naswot_avg},"
-            f"{ncd_swap_avg},{az_nas_avg},{jacobian_avg}\n"
+            f"{args.cfg},{params},{jacobian_avg},{swap_avg},{naswot_avg},"
+            f"{ncd_naswot_avg},{ncd_swap_avg},{az_nas_avg}\n"
         )
     
     if args.save_batch_jacobian and batch_rows:
