@@ -69,13 +69,13 @@ $nnUNet_preprocessed/DatasetXXX_MyDataset/
 ## 4. Get XTinyU-Net Config
 
 ```bash
-uv run python get_xtinyunet_config.py --plans /path/to/nnUNetPlans.json
+uv run python src/get_xtinyunet_config.py --plans /path/to/nnUNetPlans.json
 ```
 
 Example:
 
 ```bash
-uv run python get_xtinyunet_config.py \
+uv run python src/get_xtinyunet_config.py \
   --plans "$nnUNet_preprocessed/Dataset300_MyDataset/nnUNetPlans.json"
 ```
 
