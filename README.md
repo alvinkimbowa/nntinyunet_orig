@@ -79,16 +79,22 @@ uv run python src/generate_candidate_configs.py \
   --plans "$nnUNet_preprocessed/Dataset300_MyDataset/nnUNetPlans.json"
 ```
 
-Run the score function. This defaults to the Jacobian score:
+Run the input-output sensitivity scoring of the generated configs.
 
 ```bash
+BATCH_SIZE="all"
 uv run python src/score_net.py \
   --train_dataset_id DATASET_ID \
   --plans nnUNetPlans \
   --trainer nnUNetTrainer \
-  --cfg XTINY_CONFIG
+  --batch_size "${BATCH_SIZE}"
 ```
 
+Select the XTinyU-Net config:
+
+```bash
+uv run python src/get_xtiny_config.py --scores /path/to/DatasetXXX_metrics_b${BATCH_SIZE}.csv
+```
 
 This returns the XTinyU-Net config.
 
