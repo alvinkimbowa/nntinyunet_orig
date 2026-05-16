@@ -26,15 +26,8 @@ from at_init_metrics import (
     naswot_from_packed,
     collect_swap_packed_codes,
     swap_from_packed,
-    naswot_module_contributions,
-    aggregate_naswot_contributions,
-    save_activation_distributions,
     az_nas_score,
-    synflow_score,
-    gradnorm_score,
-    snip_score,
     jacobian_score,
-    fisher_score,
 )
 
 nnUNet_raw = os.environ['nnUNet_raw']
@@ -55,47 +48,32 @@ def build_arg_parser():
     parser.add_argument("--split_type", type=str, default="train", choices=["train", "val", "test"])
     parser.add_argument("--batch_size", type=int, default=None, help="batch size for scoring")
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--out_dir", type=str, default="results/naswot")
-    parser.add_argument("--naswot_breakdown", action="store_true",
-                        help="save per-module and aggregated NASWOT contributions")
-    parser.add_argument("--debug_activations", action="store_true",
-                        help="save per-module input/activation histograms for ReLU/LeakyReLU")
-    parser.add_argument("--debug_bins", type=int, default=100,
-                        help="histogram bins for activation debug plots")
-    parser.add_argument("--debug_max_samples", type=int, default=200000,
-                        help="max samples per histogram to avoid huge plots")
+    parser.add_argument("--out_dir", type=str, default="results/nas_metrics")
     parser.add_argument("--save_batch_jacobian", action="store_true",
                         help="save per-batch jacobian with image ids")
-    parser.add_argument("--encoder_only", action="store_true", help="compute NASWOT on encoder only")
     parser.add_argument("--ncd_alpha", type=float, default=0.95,
                         help="SAM masking probability alpha for NCD metrics")
-    parser.add_argument("--global_samples", type=int, default=0,
-                        help="if >0, compute naswot/swap on a single concatenated batch of this many samples")
     parser.add_argument("--save_naswot_codes", action="store_true",
                         help="save packed naswot codes across batches and compute a single global naswot")
     parser.add_argument("--save_swap_codes", action="store_true",
                         help="save packed swap codes across batches and compute a single global swap")
-    parser.add_argument("--save_ncd_naswot_codes", action="store_true",
-                        help="save packed NCD NASWOT codes across batches and compute a single global NCD NASWOT")
     parser.add_argument("--save_ncd_swap_codes", action="store_true",
                         help="save packed NCD SWAP codes across batches and compute a single global NCD SWAP")
+    parser.add_argument("--save_ncd_naswot_codes", action="store_true",
+                        help="save packed NCD NASWOT codes across batches and compute a single global NCD NASWOT")
     parser.add_argument(
         "--metrics",
         nargs="+",
-        default=["naswot"],
+        default=["jacobian"],
         help=(
             "list of metrics to compute"
         ),
         choices=[
+            "jacobian",
             "naswot",
             "swap",
             "ncd_naswot",
             "ncd_swap",
-            "synflow",
-            "gradnorm",
-            "snip",
-            "jacobian",
-            "fisher",
             "az_nas",
         ],
     )
@@ -295,20 +273,6 @@ def center_crop_or_pad(x: torch.Tensor, patch_size: tuple[int, int], pad_value: 
         return x[hs:hs+patch_size[0], ws:ws+patch_size[1]]
 
 
-class EncoderOnly(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        if not hasattr(model, "encoder"):
-            raise AttributeError("Model has no encoder attribute")
-
-    def forward(self, x):
-        out = self.model.encoder(x)
-        if isinstance(out, (list, tuple)):
-            return out[-1]
-        return out
-
-
 def main(args):
     set_seed(args.seed)
     device = torch.device("cpu" if args.gpu < 0 else "cuda")
@@ -334,32 +298,21 @@ def main(args):
     print("mini_batch_size", mini_batch_size)
     print("patch_size", patch_size)
 
-    if args.encoder_only:
-        model = EncoderOnly(model).to(device)
-
     swap_scores = []
     naswot_scores = []
     ncd_naswot_scores = []
     ncd_swap_scores = []
     az_nas_scores = []
-    synflow_scores = []
-    gradnorm_scores = []
-    snip_scores = []
     jacobian_scores = []
-    fisher_scores = []
-    breakdown_done = False
-    debug_done = False
     batch_rows = []
     packed_codes = {}
     packed_nbits = {}
     swap_packed_codes = {}
     swap_packed_nbits = {}
-    ncd_naswot_packed_codes = {}
-    ncd_naswot_packed_nbits = {}
     ncd_swap_packed_codes = {}
     ncd_swap_packed_nbits = {}
-    global_x = None
-    global_device = None
+    ncd_naswot_packed_codes = {}
+    ncd_naswot_packed_nbits = {}
     ncd_model = None
 
     for i, batch in tqdm(enumerate(data_loader), total=args.batch_size if args.batch_size != "all" else num_train):
@@ -377,29 +330,12 @@ def main(args):
         target = center_crop_or_pad(target, patch_size)
 
         x = imgs.float().to(device)
-        if args.debug_activations and not debug_done:
-            debug_done = True
-            debug_dir = join(
-                args.out_dir,
-                f"{dataset_name}_{args.cfg}_b{args.batch_size}_activation_debug",
-            )
-            save_activation_distributions(
-                model,
-                x,
-                debug_dir,
-                bins=args.debug_bins,
-                max_samples=args.debug_max_samples,
-            )
         if "swap" in metric_set:
             if args.save_swap_codes:
                 swap_codes, swap_nbits = collect_swap_packed_codes(model, x)
                 for k, v in swap_codes.items():
                     swap_packed_codes.setdefault(k, []).append(v)
                     swap_packed_nbits[k] = swap_nbits[k]
-            elif global_x is not None:
-                model_cpu = model.to("cpu")
-                swap_scores.append(swap_score(model_cpu, global_x))
-                model = model_cpu.to(global_device)
             else:
                 swap_scores.append(swap_score(model, x))
         if "ncd_swap" in metric_set:
@@ -438,29 +374,10 @@ def main(args):
                 for k, v in codes.items():
                     packed_codes.setdefault(k, []).append(v)
                     packed_nbits[k] = nbits[k]
-            elif global_x is not None:
-                model_cpu = model.to("cpu")
-                naswot_scores.append(naswot_score(model_cpu, global_x))
-                model = model_cpu.to(global_device)
             else:
                 naswot_scores.append(naswot_score(model, x))
-            if args.naswot_breakdown and not breakdown_done:
-                breakdown_done = True
-                module_scores = naswot_module_contributions(model, x)
-                stage_scores = aggregate_naswot_contributions(module_scores, level="stage")
-                # block_scores = aggregate_naswot_contributions(module_scores, level="convblock")
         if "az_nas" in metric_set:
             az_nas_scores.append(az_nas_score(model, x, offload_to_cpu=True))
-        if "synflow" in metric_set:
-            synflow_scores.append(
-                synflow_score(model, (x.size(0),) + tuple(x.shape[1:]), device)
-            )
-        if "gradnorm" in metric_set:
-            gradnorm_scores.append(gradnorm_score(model, x))
-        if "snip" in metric_set:
-            snip_scores.append(snip_score(model, x))
-        if "fisher" in metric_set:
-            fisher_scores.append(fisher_score(model, x))
         if "jacobian" in metric_set:
             jac = jacobian_score(model, x, loss_fn=loss_fn)
             jacobian_scores.append(jac)
@@ -512,61 +429,33 @@ def main(args):
     else:
         ncd_swap_avg = float(np.nanmean(ncd_swap_scores)) if ncd_swap_scores else float("nan")
     az_nas_avg = float(np.nanmean(az_nas_scores)) if az_nas_scores else float("nan")
-    synflow_avg = float(np.nanmean(synflow_scores)) if synflow_scores else float("nan")
-    gradnorm_avg = float(np.nanmean(gradnorm_scores)) if gradnorm_scores else float("nan")
-    snip_avg = float(np.nanmean(snip_scores)) if snip_scores else float("nan")
     if jacobian_scores:
         jac_arr = np.asarray(jacobian_scores, dtype=np.float64)
         jac_arr = jac_arr[np.isfinite(jac_arr)]
         jacobian_avg = float(np.sqrt(np.sum(jac_arr * jac_arr, dtype=np.float64))) if jac_arr.size else float("nan")
     else:
         jacobian_avg = float("nan")
-    fisher_avg = float(np.nanmean(fisher_scores)) if fisher_scores else float("nan")
     params = sum(p.numel() for p in model.parameters())
     line = (
         f"params={params} swap={swap_avg} naswot={naswot_avg} "
         f"ncd_naswot={ncd_naswot_avg} ncd_swap={ncd_swap_avg} "
-        f"az_nas={az_nas_avg} synflow={synflow_avg} "
-        f"gradnorm={gradnorm_avg} snip={snip_avg} "
-        f"jacobian={jacobian_avg} fisher={fisher_avg}"
+        f"az_nas={az_nas_avg} jacobian={jacobian_avg}"
     )
     print("\n")
     print(line)
-    if args.encoder_only:
-        out_file = join(args.out_dir, f"{dataset_name}_metrics_encoder_only_b{args.batch_size}.csv")
-    else:
-        out_file = join(args.out_dir, f"{dataset_name}_metrics_b{args.batch_size}.csv")
+    out_file = join(args.out_dir, f"{dataset_name}_metrics_b{args.batch_size}.csv")
     if args.use_pretrained:
         out_file = out_file.replace("metrics_", "metrics_pretrained_")
     print("out_file", out_file)
     need_header = not os.path.exists(out_file) or os.path.getsize(out_file) == 0
     with open(out_file, "a", encoding="utf-8") as f:
         if need_header:
-            f.write("cfg,params,swap,naswot,ncd_naswot,ncd_swap,az_nas,synflow,gradnorm,snip,jacobian,fisher\n")
+            f.write("cfg,params,swap,naswot,ncd_naswot,ncd_swap,az_nas,jacobian\n")
         f.write(
             f"{args.cfg},{params},{swap_avg},{naswot_avg},{ncd_naswot_avg},"
-            f"{ncd_swap_avg},{az_nas_avg},{synflow_avg},"
-            f"{gradnorm_avg},{snip_avg},{jacobian_avg},{fisher_avg}\n"
+            f"{ncd_swap_avg},{az_nas_avg},{jacobian_avg}\n"
         )
     
-    if args.naswot_breakdown and breakdown_done:
-        suffix = f"{dataset_name}_{args.cfg}_b{args.batch_size}"
-        # mod_path = join(args.out_dir, f"{suffix}_naswot_modules.csv")
-        stage_path = join(args.out_dir, f"{suffix}_naswot_stages.csv")
-        # block_path = join(args.out_dir, f"{suffix}_naswot_blocks.csv")
-        # with open(mod_path, "w", encoding="utf-8") as f:
-        #     f.write("module,logdet\n")
-        #     for name, val in module_scores:
-        #         f.write(f"{name},{val}\n")
-        with open(stage_path, "w", encoding="utf-8") as f:
-            f.write("stage,logdet\n")
-            for name, val in stage_scores:
-                f.write(f"{name},{val}\n")
-        # with open(block_path, "w", encoding="utf-8") as f:
-        #     f.write("block,logdet\n")
-        #     for name, val in block_scores:
-        #         f.write(f"{name},{val}\n")
-
     if args.save_batch_jacobian and batch_rows:
         batch_path = join(args.out_dir, f"{dataset_name}_batch_jacobian_b{args.batch_size}.csv")
         need_header = not os.path.exists(batch_path) or os.path.getsize(batch_path) == 0
@@ -578,6 +467,7 @@ def main(args):
                     f"{row['dataset']},{row['cfg']},{row['batch']},"
                     f"{row['jacobian']},{row['img_ids']},{row['seed']}\n"
                 )
+
     print("Done!")
     print("--------------------------------------------------\n\n")
 
